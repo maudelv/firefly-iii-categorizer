@@ -133,6 +133,7 @@
                     <th>Descripción</th>
                     <th>Importe</th>
                     <th>Moneda</th>
+                    <th>Categoría</th>
                     <th>Desde</th>
                     <th>Hacia</th>
                     <th>Acciones</th>
@@ -375,6 +376,7 @@
                 <td>${escapeHtml(item.description ?? '')}</td>
                 <td>${escapeHtml(formatAmount(item.amount))}</td>
                 <td>${escapeHtml(item.currency ?? '')}</td>
+                <td>${escapeHtml(item.category_name ?? '')}</td>
                 <td>${escapeHtml(item.source_name ?? '')}</td>
                 <td>${escapeHtml(item.destination_name ?? '')}</td>
                 <td class="actions">${renderActionCell(journalId, canClassify)}</td>

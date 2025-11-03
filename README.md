@@ -3,11 +3,6 @@
 This project allows you to automatically categorize your expenses in [Firefly III](https://www.firefly-iii.org/) by
 using configurable AI providers (OpenAI by default, Gemini supported out of the box).
 
-## Please fork me
-Unfortunately i am not able to invest more time into maintaining this project. 
-
-Feel free to fork it and create a PR that adds a link to your fork in the README file.
-
 ## How it works
 
 It provides a webhook that you can set up to be called every time a new expense is added.

@@ -58,6 +58,10 @@ export default class OpenAiService {
 In which category would a transaction from "${destinationName}" with the subject "${description}" fall into?
 Just output the name of the category. Does not have to be a complete sentence.`;
     }
+
+    getModel() {
+        return this.#model;
+    }
 }
 
 class OpenAiException extends Error {

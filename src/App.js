@@ -1,7 +1,7 @@
 import express from "express";
 import {getConfigVariable} from "./util.js";
 import FireflyService from "./FireflyService.js";
-import OpenAiService from "./OpenAiService.js";
+import {createProviderFromConfig} from "./providers/registry.js";
 import {Server} from "socket.io";
 import * as http from "http";
 import Queue from "queue";
@@ -12,7 +12,7 @@ export default class App {
     #ENABLE_UI;
 
     #firefly;
-    #openAi;
+    #provider;
 
     #server;
     #io;
@@ -29,7 +29,7 @@ export default class App {
 
     async run() {
         this.#firefly = new FireflyService();
-        this.#openAi = new OpenAiService();
+        this.#provider = createProviderFromConfig();
 
         this.#queue = new Queue({
             timeout: 30 * 1000,
@@ -127,17 +127,26 @@ export default class App {
 
             const categories = await this.#firefly.getCategories();
 
-            const {category, prompt, response} = await this.#openAi.classify(Array.from(categories.keys()), destinationName, description)
+            const classification = await this.#provider.classify({
+                categories: Array.from(categories.keys()),
+                destinationName,
+                description,
+                metadata: {
+                    transactionId,
+                },
+            });
 
             const newData = Object.assign({}, job.data);
-            newData.category = category;
-            newData.prompt = prompt;
-            newData.response = response;
+            newData.category = classification?.category ?? null;
+            newData.prompt = classification?.prompt;
+            newData.response = classification?.response;
 
             this.#jobList.updateJobData(job.id, newData);
 
-            if (category) {
-                await this.#firefly.setCategory(req.body.content.id, req.body.content.transactions, categories.get(category));
+            if (classification?.category && categories.has(classification.category)) {
+                await this.#firefly.setCategory(transactionId, transactions, categories.get(classification.category));
+            } else if (classification?.category) {
+                console.warn(`Provider returned unknown category '${classification.category}'. Transaction will remain uncategorized.`);
             }
 
             this.#jobList.setJobFinished(job.id);

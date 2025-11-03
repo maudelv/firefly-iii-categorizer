@@ -13,6 +13,50 @@ export default class FireflyService {
         this.#PERSONAL_TOKEN = getConfigVariable("FIREFLY_PERSONAL_TOKEN")
     }
 
+    /**
+     * Fetch a page of transactions from Firefly III.
+     * @param {{limit?: number, page?: number, type?: string}} [options]
+     * @returns {Promise<object>}
+     */
+    async getTransactions({limit = 10, page = 1, type = "default"} = {}) {
+        const params = new URLSearchParams({
+            limit: String(limit),
+            page: String(page),
+            type,
+        });
+
+        const response = await fetch(`${this.#BASE_URL}/api/v1/transactions?${params.toString()}`, {
+            headers: {
+                Authorization: `Bearer ${this.#PERSONAL_TOKEN}`,
+            }
+        });
+
+        if (!response.ok) {
+            throw new FireflyException(response.status, response, await response.text());
+        }
+
+        return response.json();
+    }
+
+    /**
+     * Fetch a single transaction journal by id.
+     * @param {string|number} id
+     * @returns {Promise<object>}
+     */
+    async getTransaction(id) {
+        const response = await fetch(`${this.#BASE_URL}/api/v1/transactions/${id}`, {
+            headers: {
+                Authorization: `Bearer ${this.#PERSONAL_TOKEN}`,
+            }
+        });
+
+        if (!response.ok) {
+            throw new FireflyException(response.status, response, await response.text());
+        }
+
+        return response.json();
+    }
+
     async getCategories() {
         const response = await fetch(`${this.#BASE_URL}/api/v1/categories`, {
             headers: {

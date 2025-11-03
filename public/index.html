@@ -25,6 +25,71 @@
             text-align: center;
         }
 
+        .transactions-panel {
+            margin-bottom: 2em;
+        }
+
+        .transactions-controls {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 8px;
+            align-items: center;
+            margin-bottom: 12px;
+        }
+
+        .transactions-controls label {
+            font-size: 0.9em;
+        }
+
+        .transactions-controls input {
+            width: 4.5em;
+        }
+
+        .transactions-table-wrapper {
+            overflow-x: auto;
+        }
+
+        .transactions-table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        .transactions-table th,
+        .transactions-table td {
+            text-align: left;
+            padding: 6px 8px;
+            border-bottom: 1px solid #ddd;
+        }
+
+        .transactions-table td.actions {
+            text-align: center;
+        }
+
+        .transactions-status {
+            font-size: 0.9em;
+            color: #555;
+        }
+
+        .transactions-notice {
+            display: none;
+            margin-top: 8px;
+            padding: 8px 12px;
+            border-radius: 4px;
+            font-size: 0.9em;
+        }
+
+        .transactions-notice.success {
+            background: #e8f5e9;
+            border: 1px solid #a5d6a7;
+            color: #1b5e20;
+        }
+
+        .transactions-notice.error {
+            background: #ffebee;
+            border: 1px solid #ef9a9a;
+            color: #b71c1c;
+        }
+
         .job {
             border: solid 1px;
             border-radius: 5px;
@@ -42,6 +107,45 @@
 <body>
 <div class="container">
     <h1>Firefly III AI Categorizer</h1>
+    <section class="transactions-panel">
+        <h2>Transacciones</h2>
+        <div class="transactions-controls">
+            <label>
+                Límite
+                <input type="number" id="tx-limit" min="1" max="100" value="10">
+            </label>
+            <label>
+                Página
+                <input type="number" id="tx-page" min="1" value="1">
+            </label>
+            <button type="button" id="tx-prev">Anterior</button>
+            <button type="button" id="tx-next">Siguiente</button>
+            <button type="button" id="tx-refresh">Actualizar</button>
+            <span id="tx-status" class="transactions-status" aria-live="polite"></span>
+        </div>
+        <div id="tx-notice" class="transactions-notice" aria-live="polite"></div>
+        <div class="transactions-table-wrapper">
+            <table class="transactions-table">
+                <thead>
+                <tr>
+                    <th>Fecha</th>
+                    <th>Tipo</th>
+                    <th>Descripción</th>
+                    <th>Importe</th>
+                    <th>Moneda</th>
+                    <th>Desde</th>
+                    <th>Hacia</th>
+                    <th>Acciones</th>
+                </tr>
+                </thead>
+                <tbody id="tx-table-body">
+                <tr>
+                    <td colspan="8">Sin transacciones cargadas.</td>
+                </tr>
+                </tbody>
+            </table>
+        </div>
+    </section>
     <section>
         <h2>Jobs</h2>
         <div id="mount"></div>
@@ -70,6 +174,26 @@
 
 <script src="/socket.io/socket.io.js"></script>
 <script>
+    const txState = {
+        limit: 10,
+        page: 1,
+        pageCount: null,
+        isLoading: false,
+    };
+
+    const txElements = {
+        limitInput: document.getElementById('tx-limit'),
+        pageInput: document.getElementById('tx-page'),
+        prevButton: document.getElementById('tx-prev'),
+        nextButton: document.getElementById('tx-next'),
+        refreshButton: document.getElementById('tx-refresh'),
+        status: document.getElementById('tx-status'),
+        tableBody: document.getElementById('tx-table-body'),
+        notice: document.getElementById('tx-notice'),
+    };
+
+    initTransactionsPanel();
+
     let socket = io();
 
     const mount = document.getElementById('mount');
@@ -133,6 +257,276 @@
                  </details>
             </div>` : ''}
         </article>`
+    }
+
+    function initTransactionsPanel() {
+        const {limitInput, pageInput, prevButton, nextButton, refreshButton, tableBody} = txElements;
+        if (!limitInput || !pageInput || !prevButton || !nextButton || !refreshButton || !tableBody) {
+            return;
+        }
+
+        limitInput.value = txState.limit;
+        pageInput.value = txState.page;
+
+        limitInput.addEventListener('change', () => {
+            const nextLimit = Number.parseInt(limitInput.value, 10);
+            txState.limit = Number.isNaN(nextLimit) || nextLimit <= 0 ? 10 : nextLimit;
+            limitInput.value = txState.limit;
+            txState.page = 1;
+            pageInput.value = txState.page;
+            loadTransactions();
+        });
+
+        pageInput.addEventListener('change', () => {
+            const nextPage = Number.parseInt(pageInput.value, 10);
+            txState.page = Number.isNaN(nextPage) || nextPage <= 0 ? 1 : nextPage;
+            pageInput.value = txState.page;
+            loadTransactions();
+        });
+
+        prevButton.addEventListener('click', () => {
+            if (txState.page <= 1 || txState.isLoading) {
+                return;
+            }
+            txState.page -= 1;
+            pageInput.value = txState.page;
+            loadTransactions();
+        });
+
+        nextButton.addEventListener('click', () => {
+            if (txState.isLoading) {
+                return;
+            }
+            if (txState.pageCount != null && txState.page >= txState.pageCount) {
+                return;
+            }
+            txState.page += 1;
+            pageInput.value = txState.page;
+            loadTransactions();
+        });
+
+        refreshButton.addEventListener('click', () => {
+            if (!txState.isLoading) {
+                loadTransactions();
+            }
+        });
+
+        tableBody.addEventListener('click', onTransactionTableClick);
+
+        updateNavState();
+        loadTransactions();
+    }
+
+    async function loadTransactions() {
+        const params = new URLSearchParams({
+            limit: txState.limit,
+            page: txState.page
+        });
+
+        txState.isLoading = true;
+        updateNavState();
+        setStatus('Cargando…');
+        clearNotice();
+
+        try {
+            const response = await fetch(`/api/transactions?${params.toString()}`);
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            const payload = await response.json();
+            const items = Array.isArray(payload?.items) ? payload.items : [];
+            txState.pageCount = payload?.pagination?.pageCount ?? null;
+
+            renderTransactions(items);
+
+            const countLabel = items.length === 1 ? '1 resultado' : `${items.length} resultados`;
+            setStatus(countLabel);
+        } catch (error) {
+            console.error(error);
+            txState.pageCount = null;
+            renderTransactions([]);
+            setStatus('Error al cargar transacciones');
+            setNotice('No se pudieron cargar las transacciones.', 'error');
+        } finally {
+            txState.isLoading = false;
+            updateNavState();
+        }
+    }
+
+    function renderTransactions(items) {
+        const body = txElements.tableBody;
+        if (!body) {
+            return;
+        }
+
+        if (!items || items.length === 0) {
+            body.innerHTML = '<tr><td colspan="8">No hay transacciones para mostrar.</td></tr>';
+            return;
+        }
+
+        const rows = items.map(item => {
+            const journalId = item.journalId ?? item.id ?? '';
+            const canClassify = !!journalId && (item.type ?? '').toLowerCase() === 'withdrawal' && item.category_id == null && !!item.destination_name;
+
+            return `<tr>
+                <td>${formatDate(item.date)}</td>
+                <td>${escapeHtml(item.type ?? '')}</td>
+                <td>${escapeHtml(item.description ?? '')}</td>
+                <td>${escapeHtml(formatAmount(item.amount))}</td>
+                <td>${escapeHtml(item.currency ?? '')}</td>
+                <td>${escapeHtml(item.source_name ?? '')}</td>
+                <td>${escapeHtml(item.destination_name ?? '')}</td>
+                <td class="actions">${renderActionCell(journalId, canClassify)}</td>
+            </tr>`;
+        });
+
+        body.innerHTML = rows.join('');
+    }
+
+    function renderActionCell(journalId, canClassify) {
+        if (!journalId) {
+            return '<span>—</span>';
+        }
+
+        if (!canClassify) {
+            return '<button type="button" disabled>No disponible</button>';
+        }
+
+        return `<button type="button" class="tx-classify" data-journal-id="${escapeHtml(String(journalId))}">Clasificar</button>`;
+    }
+
+    function onTransactionTableClick(event) {
+        const button = event.target.closest('.tx-classify');
+        if (!button || button.disabled) {
+            return;
+        }
+
+        const journalId = button.getAttribute('data-journal-id');
+        if (!journalId) {
+            return;
+        }
+
+        classifyTransaction(journalId, button);
+    }
+
+    async function classifyTransaction(journalId, button) {
+        try {
+            button.disabled = true;
+            button.textContent = 'Enviando…';
+
+            const response = await fetch('/api/classify', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({transactionId: journalId})
+            });
+
+            if (!response.ok) {
+                throw new Error(`HTTP ${response.status}`);
+            }
+
+            button.textContent = 'En cola';
+            setNotice('Clasificación encolada.', 'success');
+            await loadTransactions();
+        } catch (error) {
+            console.error(error);
+            button.disabled = false;
+            button.textContent = 'Clasificar';
+            setNotice('No se pudo iniciar la clasificación.', 'error');
+        }
+    }
+
+    function setStatus(message) {
+        if (txElements.status) {
+            txElements.status.textContent = message ?? '';
+        }
+    }
+
+    function setNotice(message, type = 'info') {
+        const el = txElements.notice;
+        if (!el) {
+            return;
+        }
+
+        clearTimeout(el._hideTimer);
+        el.textContent = message ?? '';
+        el.classList.remove('success', 'error');
+
+        if (!message) {
+            el.style.display = 'none';
+            return;
+        }
+
+        if (type === 'success') {
+            el.classList.add('success');
+        } else if (type === 'error') {
+            el.classList.add('error');
+        }
+
+        el.style.display = 'block';
+
+        clearTimeout(el._hideTimer);
+        el._hideTimer = setTimeout(() => {
+            el.style.display = 'none';
+        }, 2500);
+    }
+
+    function clearNotice() {
+        setNotice('');
+    }
+
+    function updateNavState() {
+        const {prevButton, nextButton, limitInput, pageInput, refreshButton} = txElements;
+
+        if (prevButton) {
+            prevButton.disabled = txState.isLoading || txState.page <= 1;
+        }
+        if (nextButton) {
+            const atEnd = txState.pageCount != null && txState.page >= txState.pageCount;
+            nextButton.disabled = txState.isLoading || atEnd;
+        }
+        if (limitInput) {
+            limitInput.disabled = txState.isLoading;
+        }
+        if (pageInput) {
+            pageInput.disabled = txState.isLoading;
+        }
+        if (refreshButton) {
+            refreshButton.disabled = txState.isLoading;
+        }
+    }
+
+    function formatDate(value) {
+        if (!value) {
+            return '';
+        }
+
+        const date = new Date(value);
+        if (Number.isNaN(date.getTime())) {
+            return escapeHtml(String(value));
+        }
+
+        return Intl.DateTimeFormat(undefined, {
+            dateStyle: 'medium',
+        }).format(date);
+    }
+
+    function formatAmount(amount) {
+        if (amount == null) {
+            return '';
+        }
+        return String(amount);
+    }
+
+    function escapeHtml(value) {
+        return String(value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
     }
 </script>
 </body>

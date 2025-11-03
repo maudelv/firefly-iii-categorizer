@@ -1,7 +1,7 @@
 # Firefly III AI categorization
 
 This project allows you to automatically categorize your expenses in [Firefly III](https://www.firefly-iii.org/) by
-using OpenAI.
+using configurable AI providers (OpenAI by default, Gemini supported out of the box).
 
 ## Please fork me
 Unfortunately i am not able to invest more time into maintaining this project. 
@@ -12,10 +12,10 @@ Feel free to fork it and create a PR that adds a link to your fork in the README
 
 It provides a webhook that you can set up to be called every time a new expense is added.
 
-It will then generate a prompt for OpenAI, including your existing categories, the recipient and the description of the
-transaction.
+It will then generate a prompt for the configured AI provider, including your existing categories, the recipient and the
+description of the transaction.
 
-OpenAI will, based on that prompt, guess the category for the transaction.
+The provider will, based on that prompt, guess the category for the transaction.
 
 If it is one of your existing categories, the tool will set the category on the transaction and also add a tag to the
 transaction.
@@ -24,7 +24,7 @@ If it cannot detect the category, it will not update anything.
 
 ## Privacy
 
-Please note that some details of the transactions will be sent to OpenAI as information to guess the category.
+Please note that some details of the transactions will be sent to the configured AI provider as information to guess the category.
 
 These are:
 
@@ -45,7 +45,11 @@ like Notepad++ or Visual Studio Code to copy-and-paste it.
 ![Step 2](docs/img/pat2.png)
 ![Step 3](docs/img/pat3.png)
 
-### 2. Get an OpenAI API Key
+### 2. Get AI provider credentials
+
+By default the app uses OpenAI. Follow the instructions for the provider you want to run and export the corresponding environment variables.
+
+#### OpenAI (default)
 
 The project needs to be configured with your OpenAI account's secret key.
 
@@ -63,6 +67,16 @@ payment details to begin interacting with the API for the first time.
 After that you have to enable billing in your account.
 
 Tip: Make sure to set budget limits to prevent suprises at the end of the month.
+
+Set `AI_PROVIDER=openai` (default) and `OPENAI_API_KEY` with the secret you generated.
+
+#### Gemini
+
+- Visit the Google AI developer site at https://ai.google.dev/ and open Google AI Studio.
+- Create an API key at https://aistudio.google.com/app/apikey tied to the project that has Gemini access.
+- Copy the key and set it as `GEMINI_API_KEY` in your environment.
+
+Gemini models require an allowed billing project. You can optionally override the default model by exporting `GEMINI_MODEL` (defaults to `gemini-2.5-flash`). Remember to set `AI_PROVIDER=gemini` when using this integration.
 
 ### 3. Start the application via Docker
 
@@ -125,17 +139,78 @@ categorization everytime a new transaction comes in.
 ![Step 2](docs/img/webhook2.png)
 ![Step 3](docs/img/webhook3.png)
 
-Now you are ready and every new withdrawal transaction should be automatically categorized by OpenAI.
+Now you are ready and every new withdrawal transaction should be automatically categorized by the configured AI provider.
 
 ## User Interface
 
-The application comes with a minimal UI that allows you to monitor the classification queue and see the OpenAI prompts
+The application comes with a minimal UI that allows you to monitor the classification queue and see the provider prompts
 and responses. This UI is disabled by default.
 
 To enable this UI set the environment variable `ENABLE_UI` to `true`.
 
 After a restart of the application the UI can be accessed at `http://localhost:3000/` (or any other URL that allows you
 to reach the container).
+
+## Manual listing and classification
+
+In addition to the webhook you can review and enqueue classifications manually. Set `FIREFLY_URL` and
+`FIREFLY_PERSONAL_TOKEN` so the server can talk to your Firefly III instance.
+
+### List transactions
+
+The REST endpoint `/api/transactions` mirrors Firefly's pagination and returns a simplified view of every split in the
+resulting journals. You can filter by `limit`, `page`, and `type` (defaults to `default`).
+
+```shell
+curl "http://localhost:3000/api/transactions?limit=10&page=1"
+```
+
+Sample response (truncated):
+
+```json
+{
+  "items": [
+    {
+      "journalId": "10898",
+      "id": "10898:0",
+      "date": "2025-11-03T00:08:00+01:00",
+      "type": "withdrawal",
+      "description": "Transferencia inmediata...",
+      "amount": "333.02",
+      "currency": "EUR",
+      "source_name": "Trade Republic",
+      "destination_name": "Openbank",
+      "category_id": null
+    }
+  ],
+  "pagination": {
+    "current": 1,
+    "limit": 10,
+    "pageCount": 2259,
+    "next": "http://localhost/api/v1/transactions?limit=10&type=default&page=2"
+  }
+}
+```
+
+### Enqueue a manual classification
+
+Once you decide to classify a journal, submit its ID to `/api/classify`. The server fetches the latest details, performs
+the same validations as the webhook, and enqueues the job in the existing queue.
+
+```shell
+curl -X POST "http://localhost:3000/api/classify" \
+  -H "Content-Type: application/json" \
+  -d '{"transactionId":"10898"}'
+```
+
+The endpoint replies with the queued job metadata (`202 Accepted`) so you can track progress via Socket.IO or the Jobs panel.
+
+### Using the UI
+
+When `ENABLE_UI=true`, the dashboard shows a new **Transacciones** section above the Jobs feed. Use the limit/page
+controls to page through `/api/transactions`, review each split, and click **Clasificar** to trigger `/api/classify`.
+Only uncategorized withdrawals expose the button; queued jobs then appear immediately in the Jobs list for real-time
+tracking.
 
 ## Adjust Tag name
 
@@ -152,7 +227,10 @@ If you have to run the application on a different port than the default port `30
 
 - `FIREFLY_URL`: The URL to your Firefly III instance. Example: `https://firefly.example.com`. (required)
 - `FIREFLY_PERSONAL_TOKEN`: A Firefly III Personal Access Token. (required)
-- `OPENAI_API_KEY`: The OpenAI API Key to authenticate against OpenAI. (required)
+- `AI_PROVIDER`: Selects which AI integration to run (`openai`, `gemini`). (Default: `openai`)
+- `OPENAI_API_KEY`: The OpenAI API Key to authenticate against OpenAI. (Required when `AI_PROVIDER=openai`)
+- `GEMINI_API_KEY`: Google AI Studio API key for Gemini access. (Required when `AI_PROVIDER=gemini`)
+- `GEMINI_MODEL`: Gemini model name to use. (Default: `gemini-2.5-flash`)
 - `ENABLE_UI`: If the user interface should be enabled. (Default: `false`)
 - `FIREFLY_TAG`: The tag to assign to the processed transactions. (Default: `AI categorized`)
 - `PORT`: The port where the application listens. (Default: `3000`)

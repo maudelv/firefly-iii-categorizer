@@ -163,6 +163,7 @@ export default class App {
                             currency: split?.currency_code ?? entry?.attributes?.currency_code ?? null,
                             source_name: split?.source_name ?? null,
                             destination_name: split?.destination_name ?? null,
+                            category_name: split?.category_name ?? null,
                             category_id: split?.category_id ?? null,
                         });
                     });

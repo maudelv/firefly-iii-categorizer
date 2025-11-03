@@ -58,6 +58,7 @@ export default class App {
 
         this.#express.get('/api/transactions', this.#getTransactions.bind(this))
         this.#express.post('/api/classify', this.#postClassify.bind(this))
+        this.#express.post('/api/classify/batch', this.#postClassifyBatch.bind(this))
         this.#express.post('/webhook', this.#onWebhook.bind(this))
 
         this.#server.listen(this.#PORT, async () => {
@@ -211,53 +212,7 @@ export default class App {
                 return;
             }
 
-            const transaction = await this.#firefly.getTransaction(transactionId);
-            const transactionData = transaction?.data;
-            if (!transactionData) {
-                res.status(404).send("Transaction not found");
-                return;
-            }
-
-            const splits = transactionData?.attributes?.transactions ?? [];
-            if (!Array.isArray(splits) || splits.length === 0) {
-                res.status(400).send("Transaction has no splits to classify");
-                return;
-            }
-
-            const primarySplit = splits[0];
-            if (primarySplit?.type !== "withdrawal") {
-                res.status(400).send("Only withdrawal transactions can be classified");
-                return;
-            }
-
-            if (primarySplit?.category_id != null) {
-                res.status(400).send("Transaction already has a category");
-                return;
-            }
-
-            if (!primarySplit?.description) {
-                res.status(400).send("Transaction is missing a description");
-                return;
-            }
-
-            if (!primarySplit?.destination_name) {
-                res.status(400).send("Transaction is missing a destination name");
-                return;
-            }
-
-            const job = this.#jobList.createJob({
-                transactionId: transactionData.id ?? String(transactionId),
-                destinationName: primarySplit.destination_name,
-                description: primarySplit.description
-            });
-
-            this.#enqueueClassificationJob({
-                job,
-                transactionId: transactionData.id ?? String(transactionId),
-                transactions: splits,
-                destinationName: primarySplit.destination_name,
-                description: primarySplit.description
-            });
+            const job = await this.#createClassificationJobFromTransactionId(transactionId);
 
             res.status(202).json({job});
         } catch (error) {
@@ -265,6 +220,98 @@ export default class App {
             const status = error?.code ?? 500;
             res.status(status).send(error?.message ?? "Unable to enqueue classification job");
         }
+    }
+
+    async #postClassifyBatch(req, res) {
+        try {
+            const transactionIdsInput = req.body?.transactionIds;
+            if (!Array.isArray(transactionIdsInput) || transactionIdsInput.length === 0) {
+                res.status(400).send("transactionIds must be a non-empty array");
+                return;
+            }
+
+            const normalizedIds = Array.from(new Set(
+                transactionIdsInput
+                    .map(id => {
+                        if (typeof id === "number" || typeof id === "string") {
+                            const trimmed = String(id).trim();
+                            return trimmed.length > 0 ? trimmed : null;
+                        }
+                        return null;
+                    })
+                    .filter(Boolean)
+            ));
+
+            if (normalizedIds.length === 0) {
+                res.status(400).send("transactionIds must contain at least one valid identifier");
+                return;
+            }
+
+            const jobs = [];
+            const errors = [];
+
+            for (const id of normalizedIds) {
+                try {
+                    const job = await this.#createClassificationJobFromTransactionId(id);
+                    jobs.push(job);
+                } catch (error) {
+                    console.error(`Failed to enqueue classification job for transaction ${id}`, error);
+                    errors.push({
+                        transactionId: id,
+                        status: error?.code ?? 500,
+                        message: error?.message ?? "Unable to enqueue classification job"
+                    });
+                }
+            }
+
+            const payload = {jobs, errors};
+
+            if (jobs.length === 0) {
+                const status = errors[0]?.status ?? 500;
+                res.status(status).json(payload);
+                return;
+            }
+
+            if (errors.length > 0) {
+                res.status(207).json(payload);
+                return;
+            }
+
+            res.status(202).json(payload);
+        } catch (error) {
+            console.error("Failed to enqueue batch classification jobs", error);
+            const status = error?.code ?? 500;
+            res.status(status).send(error?.message ?? "Unable to enqueue classification jobs");
+        }
+    }
+
+    async #createClassificationJobFromTransactionId(transactionId) {
+        const transaction = await this.#firefly.getTransaction(transactionId);
+        const transactionData = transaction?.data;
+        if (!transactionData) {
+            throw new HttpError(404, "Transaction not found");
+        }
+
+        const splits = transactionData?.attributes?.transactions ?? [];
+        const primarySplit = this.#ensureClassifiableTransaction(splits);
+
+        const normalizedId = transactionData.id ?? String(transactionId);
+
+        const job = this.#jobList.createJob({
+            transactionId: normalizedId,
+            destinationName: primarySplit.destination_name,
+            description: primarySplit.description
+        });
+
+        this.#enqueueClassificationJob({
+            job,
+            transactionId: normalizedId,
+            transactions: splits,
+            destinationName: primarySplit.destination_name,
+            description: primarySplit.description
+        });
+
+        return job;
     }
 
     #enqueueClassificationJob({job, transactionId, transactions, destinationName, description}) {
@@ -307,11 +354,45 @@ export default class App {
 
         return parsed;
     }
+
+    #ensureClassifiableTransaction(transactions) {
+        if (!Array.isArray(transactions) || transactions.length === 0) {
+            throw new HttpError(400, "Transaction has no splits to classify");
+        }
+
+        const primarySplit = transactions[0];
+        if (primarySplit?.type !== "withdrawal") {
+            throw new HttpError(400, "Only withdrawal transactions can be classified");
+        }
+
+        if (primarySplit?.category_id != null) {
+            throw new HttpError(400, "Transaction already has a category");
+        }
+
+        if (!primarySplit?.description) {
+            throw new HttpError(400, "Transaction is missing a description");
+        }
+
+        if (!primarySplit?.destination_name) {
+            throw new HttpError(400, "Transaction is missing a destination name");
+        }
+
+        return primarySplit;
+    }
 }
 
 class WebhookException extends Error {
 
     constructor(message) {
         super(message);
+    }
+}
+
+class HttpError extends Error {
+    code;
+
+    constructor(code, message) {
+        super(message);
+        this.code = code;
     }
 }

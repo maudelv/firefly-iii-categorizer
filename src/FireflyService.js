@@ -260,19 +260,12 @@ export default class FireflyService {
         });
 
         const url = `${this.#BASE_URL}/api/v1/autocomplete/accounts?${params.toString()}`;
-        console.debug(`[ExpenseAccountSuggestions] Fetching from: ${url}`);
-        console.debug(`[ExpenseAccountSuggestions] Query: "${query.trim()}", Limit: ${limit}`);
-        console.debug(`[ExpenseAccountSuggestions] Authorization header present: ${!!this.#PERSONAL_TOKEN}`);
-        console.debug(`[ExpenseAccountSuggestions] Token length: ${this.#PERSONAL_TOKEN?.length || 0}`);
 
         const response = await fetch(url, {
             headers: {
                 Authorization: `Bearer ${this.#PERSONAL_TOKEN}`,
             }
         });
-
-        console.debug(`[ExpenseAccountSuggestions] Response status: ${response.status} ${response.statusText}`);
-        console.debug(`[ExpenseAccountSuggestions] Response headers:`, Object.fromEntries(response.headers.entries()));
 
         if (response.status === 404) {
             return [];

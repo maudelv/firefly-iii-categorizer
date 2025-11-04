@@ -18,7 +18,7 @@ export default class OpenAiService {
         // Set default model options from environment
         this.#defaultOptions = {
             temperature: parseFloat(getConfigVariable("OPENAI_TEMPERATURE", "0.3")),
-            maxTokens: parseInt(getConfigVariable("OPENAI_MAX_TOKENS", "2048"), 10)
+            max_tokens: parseInt(getConfigVariable("OPENAI_MAX_TOKENS", "2048"), 10)
         };
     }
 

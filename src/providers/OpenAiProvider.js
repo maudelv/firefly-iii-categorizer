@@ -9,8 +9,12 @@ export default class OpenAiProvider extends Provider {
         this.#service = new OpenAiService();
     }
 
-    async classify({categories, destinationName, description, metadata = {}}) { // eslint-disable-line no-unused-vars
-        return this.#service.classify(categories, destinationName, description);
+    async classify({categories, destinationName, description, metadata = {}, modelOptions = {}}) { // eslint-disable-line no-unused-vars
+        return this.#service.classify(categories, destinationName, description, modelOptions);
+    }
+
+    async getCompletion(prompt, modelOptions = {}) {
+        return this.#service.getCompletion(prompt, modelOptions);
     }
 
     getCapabilities() {

@@ -4,6 +4,7 @@ import {getConfigVariable} from "./util.js";
 export default class OpenAiService {
     #openAi;
     #model = "gpt-3.5-turbo-instruct";
+    #defaultOptions = {};
 
     constructor() {
         const apiKey = getConfigVariable("OPENAI_API_KEY")
@@ -13,23 +14,33 @@ export default class OpenAiService {
         });
 
         this.#openAi = new OpenAIApi(configuration)
+
+        // Set default model options from environment
+        this.#defaultOptions = {
+            temperature: parseFloat(getConfigVariable("OPENAI_TEMPERATURE", "0.3")),
+            maxTokens: parseInt(getConfigVariable("OPENAI_MAX_TOKENS", "2048"), 10)
+        };
     }
 
-    async classify(categories, destinationName, description) {
+    async classify(categories, destinationName, description, modelOptions = {}) {
         try {
             const prompt = this.#generatePrompt(categories, destinationName, description);
 
-            const response = await this.#openAi.createCompletion({
+            const options = {
                 model: this.#model,
-                prompt
-            });
+                prompt,
+                ...this.#defaultOptions,
+                ...modelOptions
+            };
+
+            const response = await this.#openAi.createCompletion(options);
 
             let guess = response.data.choices[0].text;
             guess = guess.replace("\n", "");
             guess = guess.trim();
 
             if (categories.indexOf(guess) === -1) {
-                console.warn(`OpenAI could not classify the transaction. 
+                console.warn(`OpenAI could not classify the transaction.
                 Prompt: ${prompt}
                 OpenAIs guess: ${guess}`)
                 return null;
@@ -57,6 +68,35 @@ export default class OpenAiService {
         return `Given i want to categorize transactions on my bank account into this categories: ${categories.join(", ")}
 In which category would a transaction from "${destinationName}" with the subject "${description}" fall into?
 Just output the name of the category. Does not have to be a complete sentence.`;
+    }
+
+    async getCompletion(prompt, modelOptions = {}) {
+        try {
+            const options = {
+                model: this.#model,
+                prompt,
+                ...this.#defaultOptions,
+                ...modelOptions
+            };
+
+            const response = await this.#openAi.createCompletion(options);
+
+            let text = response.data.choices[0].text;
+            text = text.replace("\n", "");
+            text = text.trim();
+
+            return text;
+
+        } catch (error) {
+            if (error.response) {
+                console.error(error.response.status);
+                console.error(error.response.data);
+                throw new OpenAiException(error.status, error.response, error.response.data);
+            } else {
+                console.error(error.message);
+                throw new OpenAiException(null, null, error.message);
+            }
+        }
     }
 
     getModel() {

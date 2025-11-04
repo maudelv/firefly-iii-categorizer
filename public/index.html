@@ -121,6 +121,7 @@
             <button type="button" id="tx-prev">Anterior</button>
             <button type="button" id="tx-next">Siguiente</button>
             <button type="button" id="tx-refresh">Actualizar</button>
+            <button type="button" id="tx-batch" disabled>Clasificar elegibles</button>
             <span id="tx-status" class="transactions-status" aria-live="polite"></span>
         </div>
         <div id="tx-notice" class="transactions-notice" aria-live="polite"></div>
@@ -191,6 +192,12 @@
         status: document.getElementById('tx-status'),
         tableBody: document.getElementById('tx-table-body'),
         notice: document.getElementById('tx-notice'),
+        batchButton: document.getElementById('tx-batch'),
+    };
+
+    const batchState = {
+        isProcessing: false,
+        eligibleIds: [],
     };
 
     initTransactionsPanel();
@@ -245,6 +252,12 @@
             <div><strong>Description:</strong> <span>${job.data?.description || ''}</span>
             <div><strong>Guessed category:</strong> <span>${job.data?.category ? job.data.category : '<em>Not yet classified</em>'}</span>
             </div>
+            ${ job.data?.expenseAccount ? `<div><strong>Expense Account:</strong> <span>${job.data.expenseAccount.name} (${job.data.expenseAccount.action})</span><br>
+                <details>
+                    <summary>Description</summary>
+                    <p>${job.data.expenseAccount.description}</p>
+                </details>
+            </div>` : ''}
             ${ job.data?.prompt ? `<div><strong>Prompt:</strong><br>
                 <details>
                     <summary>Show</summary>
@@ -261,8 +274,8 @@
     }
 
     function initTransactionsPanel() {
-        const {limitInput, pageInput, prevButton, nextButton, refreshButton, tableBody} = txElements;
-        if (!limitInput || !pageInput || !prevButton || !nextButton || !refreshButton || !tableBody) {
+        const {limitInput, pageInput, prevButton, nextButton, refreshButton, tableBody, batchButton} = txElements;
+        if (!limitInput || !pageInput || !prevButton || !nextButton || !refreshButton || !tableBody || !batchButton) {
             return;
         }
 
@@ -312,9 +325,12 @@
             }
         });
 
+        batchButton.addEventListener('click', onBatchClassifyClick);
+
         tableBody.addEventListener('click', onTransactionTableClick);
 
         updateNavState();
+        updateBatchButton();
         loadTransactions();
     }
 
@@ -324,6 +340,7 @@
             page: txState.page
         });
 
+        batchState.eligibleIds = [];
         txState.isLoading = true;
         updateNavState();
         setStatus('Cargando…');
@@ -352,6 +369,7 @@
         } finally {
             txState.isLoading = false;
             updateNavState();
+            updateBatchButton();
         }
     }
 
@@ -361,14 +379,22 @@
             return;
         }
 
+        const eligibleSet = new Set();
+
         if (!items || items.length === 0) {
             body.innerHTML = '<tr><td colspan="8">No hay transacciones para mostrar.</td></tr>';
+            batchState.eligibleIds = [];
+            updateBatchButton();
             return;
         }
 
         const rows = items.map(item => {
             const journalId = item.journalId ?? item.id ?? '';
             const canClassify = !!journalId && (item.type ?? '').toLowerCase() === 'withdrawal' && item.category_id == null && !!item.destination_name;
+
+            if (canClassify) {
+                eligibleSet.add(String(journalId));
+            }
 
             return `<tr>
                 <td>${formatDate(item.date)}</td>
@@ -384,6 +410,8 @@
         });
 
         body.innerHTML = rows.join('');
+        batchState.eligibleIds = Array.from(eligibleSet);
+        updateBatchButton();
     }
 
     function renderActionCell(journalId, canClassify) {
@@ -437,6 +465,64 @@
             button.disabled = false;
             button.textContent = 'Clasificar';
             setNotice('No se pudo iniciar la clasificación.', 'error');
+        }
+    }
+
+    async function onBatchClassifyClick() {
+        if (batchState.isProcessing || batchState.eligibleIds.length === 0) {
+            return;
+        }
+
+        batchState.isProcessing = true;
+        updateBatchButton();
+        setNotice('Enviando lote…');
+
+        try {
+            const response = await fetch('/api/classify/batch', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({transactionIds: batchState.eligibleIds})
+            });
+
+            const contentType = response.headers.get('content-type') ?? '';
+            let payload = null;
+            if (contentType.includes('application/json')) {
+                payload = await response.json();
+            }
+            payload = payload ?? {};
+
+            if (!response.ok) {
+                const message = payload?.errors?.[0]?.message ?? payload?.message ?? 'No se pudieron encolar las transacciones.';
+                setNotice(message, 'error');
+                return;
+            }
+
+            const queuedCount = Array.isArray(payload?.jobs) ? payload.jobs.length : 0;
+            const errorCount = Array.isArray(payload?.errors) ? payload.errors.length : 0;
+
+            if (errorCount > 0) {
+                const parts = [];
+                if (queuedCount > 0) {
+                    parts.push(queuedCount === 1 ? '1 transacción encolada.' : `${queuedCount} transacciones encoladas.`);
+                }
+                parts.push(errorCount === 1 ? '1 transacción no se pudo encolar.' : `${errorCount} transacciones no se pudieron encolar.`);
+                setNotice(parts.join(' '), 'error');
+            } else if (queuedCount > 0) {
+                const successMessage = queuedCount === 1 ? '1 transacción encolada.' : `${queuedCount} transacciones encoladas.`;
+                setNotice(successMessage, 'success');
+            } else {
+                setNotice('No se encoló ninguna transacción.', 'error');
+            }
+
+            await loadTransactions();
+        } catch (error) {
+            console.error(error);
+            setNotice('No se pudieron encolar las transacciones.', 'error');
+        } finally {
+            batchState.isProcessing = false;
+            updateBatchButton();
         }
     }
 
@@ -498,6 +584,26 @@
         if (refreshButton) {
             refreshButton.disabled = txState.isLoading;
         }
+
+        updateBatchButton();
+    }
+
+    function updateBatchButton() {
+        const button = txElements.batchButton;
+        if (!button) {
+            return;
+        }
+
+        const count = batchState.eligibleIds.length;
+        if (batchState.isProcessing) {
+            button.textContent = 'Enviando…';
+        } else if (count > 0) {
+            button.textContent = `Clasificar elegibles (${count})`;
+        } else {
+            button.textContent = 'Clasificar elegibles';
+        }
+
+        button.disabled = txState.isLoading || batchState.isProcessing || count === 0;
     }
 
     function formatDate(value) {

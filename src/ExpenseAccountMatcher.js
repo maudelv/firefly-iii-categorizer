@@ -112,8 +112,8 @@ export default class ExpenseAccountMatcher {
     }
 
     #buildPrompt(transaction, candidateNames) {
-        const candidateDirective = candidateNames.length > 0 ? "existing\" or \"create" : "create";
-        const candidatesText = candidateNames.length > 0 ? candidateNames.join(", ") : "None";
+        const hasCandidates = candidateNames.length > 0;
+        const candidatesText = hasCandidates ? candidateNames.join(", ") : "None";
 
         return `Analyze this transaction and respond with JSON:
 Transaction: "${transaction.description}"${transaction.destination_name ? ` at ${transaction.destination_name}` : ""}
@@ -121,13 +121,23 @@ Candidates: ${candidatesText}
 If candidates exist, match one. Otherwise, create a new account.
 Required response format:
 {
-    "decision": "${candidateDirective}",
+    "decision": "existing",
     "account": {
         "name": "account name here",
         "description": "brief description here"
     }
 }
-No explanations, just JSON.`;
+
+Or for new accounts:
+{
+    "decision": "create",
+    "account": {
+        "name": "new account name here",
+        "description": "brief description here"
+    }
+}
+
+The decision field must be exactly either "existing" or "create". No explanations, just JSON.`;
     }
 
     async matchTransaction(transaction) {
@@ -168,7 +178,11 @@ No explanations, just JSON.`;
         }
 
         const aiDecision = await this.#runAiDecision(transaction, autocompleteCandidates);
-        this.#decisionCache.set(cacheKey, this.#cloneDecision(aiDecision));
+
+        if (aiDecision.decision === "existing") {
+            this.#decisionCache.set(cacheKey, this.#cloneDecision(aiDecision));
+        }
+
         return aiDecision;
     }
 
@@ -405,5 +419,35 @@ No explanations, just JSON.`;
                 source: decision.account.source,
             },
         };
+    }
+
+    /**
+     * Update cache entry with the actual account ID after creating a new account
+     * @param {Object} transaction - The transaction that was processed
+     * @param {string} accountId - The ID of the newly created account
+     */
+    updateCacheWithAccountId(transaction, accountId) {
+        if (!transaction || !accountId) {
+            return;
+        }
+
+        const descriptionInfo = this.#normalizeText(transaction.description);
+        const destinationInfo = this.#normalizeText(transaction.destination_name ?? "");
+        const cacheKey = this.#buildCacheKey(descriptionInfo.normalizedText, destinationInfo.normalizedText);
+
+        // Update the cached decision with the actual account ID
+        if (this.#decisionCache.has(cacheKey)) {
+            const cachedDecision = this.#decisionCache.get(cacheKey);
+            if (cachedDecision.decision === "create") {
+                cachedDecision.decision = "existing";
+                cachedDecision.account = {
+                    id: accountId,
+                    name: cachedDecision.account.name,
+                    description: cachedDecision.account.description,
+                    source: "created"
+                };
+                this.#decisionCache.set(cacheKey, this.#cloneDecision(cachedDecision));
+            }
+        }
     }
 }

@@ -362,12 +362,15 @@ export default class App {
                     throw new ExpenseAccountError('Invalid expense account decision structure returned by AI');
                 }
 
+                const finalAccountId = accountId || decision.account?.id || null;
+
                 newData.expenseAccount = {
                     name: decision.account.name,
                     description: decision.account.description || '',
                     action: accountAction,
                     decision: decision.decision,
                     source: decision.account.source || null,
+                    accountId: finalAccountId,
                 };
             } catch (e) {
                 const error = e instanceof ExpenseAccountError ? e : new ExpenseAccountError(e.message, e);
@@ -391,6 +394,7 @@ export default class App {
             if (newData.expenseAccount && newData.expenseAccount.action !== 'failed') {
                 if (accountAction === "created") {
                     accountId = await this.#firefly.createAccount(newData.expenseAccount.name, 'expense', newData.expenseAccount.description);
+                    this.#expenseAccountMatcher.updateCacheWithAccountId(transaction, accountId);
                 }
                 await this.#firefly.setAccount(transactionId, transactions, accountId, 'destination');
             }

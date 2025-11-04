@@ -252,22 +252,22 @@
             <div><strong>Description:</strong> <span>${job.data?.description || ''}</span>
             <div><strong>Guessed category:</strong> <span>${job.data?.category ? job.data.category : '<em>Not yet classified</em>'}</span>
             </div>
-            ${ job.data?.expenseAccount ? `<div><strong>Expense Account:</strong> <span>${job.data.expenseAccount.name} (${job.data.expenseAccount.action})</span><br>
+            ${ job.data?.expenseAccount ? `<div><strong>Expense Account:</strong> <span>${escapeHtml(job.data.expenseAccount.name)} (${escapeHtml(job.data.expenseAccount.action)})</span><br>
                 <details>
                     <summary>Description</summary>
-                    <p>${job.data.expenseAccount.description}</p>
+                    <p>${escapeHtml(job.data.expenseAccount.description)}</p>
                 </details>
             </div>` : ''}
             ${ job.data?.prompt ? `<div><strong>Prompt:</strong><br>
                 <details>
                     <summary>Show</summary>
-                    <pre>${job.data.prompt}</pre>
+                    <pre>${escapeHtml(job.data.prompt)}</pre>
                 </details>
             </div>` : ''}
             ${ job.data?.response ? `<div><strong>Open AI's response:</strong>
                  <details>
                     <summary>Show</summary>
-                    <pre>${job.data.response}</pre>
+                    <pre>${escapeHtml(job.data.response)}</pre>
                  </details>
             </div>` : ''}
         </article>`

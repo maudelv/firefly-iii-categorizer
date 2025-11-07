@@ -1,38 +1,5 @@
 import {getConfigVariable} from "./util.js";
 
-const PLACEHOLDER_NAMES = new Set([
-    "",
-    "no name",
-    "sin nombre",
-    "unknown",
-    "desconocido",
-]);
-
-function isPlaceholderName(name) {
-    if (name == null) {
-        return true;
-    }
-
-    const normalized = String(name)
-        .normalize("NFD")
-        .replace(/[\u0300-\u036f]/g, "")
-        .toLowerCase()
-        .trim();
-
-    if (normalized.length === 0) {
-        return true;
-    }
-
-    const stripped = normalized
-        .replace(/[()\[\]{}]/g, "")
-        .replace(/"/g, "")
-        .replace(/'+/g, "")
-        .replace(/\s+/g, " ")
-        .trim();
-
-    return stripped.length === 0 || PLACEHOLDER_NAMES.has(stripped);
-}
-
 export default class FireflyService {
     #BASE_URL;
     #PERSONAL_TOKEN;
@@ -90,6 +57,11 @@ export default class FireflyService {
         return response.json();
     }
 
+    /**
+     * Fetch categories on Firefly III.
+     *
+     * @returns {Promise<Map<string, string>>}
+     */
     async getCategories() {
         const response = await fetch(`${this.#BASE_URL}/api/v1/categories`, {
             headers: {
@@ -111,6 +83,14 @@ export default class FireflyService {
         return categories;
     }
 
+    /**
+     * Update transaction journals within a transaction by setting a category and adding a tag.
+     *
+     * @param {string} transactionId - The parent transaction ID to update.
+     * @param {Array<{transaction_journal_id: string, tags?: Array<string>}>} transactions - Array of transaction journals to update with categories.
+     * @param {string} categoryId - The category ID to assign to all transaction journals.
+     * @returns {Promise<void>}
+     */
     async setCategory(transactionId, transactions, categoryId) {
         const tag = getConfigVariable("FIREFLY_TAG", "AI categorized");
 
@@ -227,21 +207,10 @@ export default class FireflyService {
 
         if (!response.ok) {
             const responseText = await response.text();
-            console.error(`[Firefly] Create account error (${response.status}): ${responseText.substring(0, 200)}`);
             throw new FireflyException(response.status, response, responseText);
         }
 
-        let data;
-        const responseText = await response.text();
-
-        try {
-            console.debug(`[Firefly] Parsing create account response...`);
-            data = JSON.parse(responseText);
-            console.debug(`[Firefly] Successfully parsed create account response`);
-        } catch (parseError) {
-            console.error(`[Firefly] ERROR: Failed to parse create account response:`, responseText.substring(0, 200));
-            throw new SyntaxError(`Invalid JSON from create account API: ${parseError.message}`);
-        }
+        let data = await response.json();
 
         return data.data.id;
     }
@@ -267,28 +236,12 @@ export default class FireflyService {
             }
         });
 
-        if (response.status === 404) {
-            return [];
-        }
-
         if (!response.ok) {
             const responseText = await response.text();
-            console.error(`[ExpenseAccountSuggestions] API error (${response.status}): ${responseText.substring(0, 200)}`);
             throw new FireflyException(response.status, response, responseText);
         }
 
-        let payload;
-        try {
-            payload = await response.json();
-        } catch (error) {
-            console.error(`[ExpenseAccountSuggestions] Failed to parse JSON response: ${error.message}`);
-            throw new SyntaxError(`Invalid JSON from autocomplete API: ${error.message}`);
-        }
-
-        if (!Array.isArray(payload)) {
-            console.warn(`[ExpenseAccountSuggestions] Expected array but received ${typeof payload}. Returning empty array.`);
-            return [];
-        }
+        const payload = await response.json();
 
         console.debug(`[ExpenseAccountSuggestions] Processing ${payload.length} account suggestions`);
 
@@ -299,15 +252,7 @@ export default class FireflyService {
             }))
             .filter(item => item.name.length > 0 && item.id);
 
-        const filtered = mapped.filter(item => !isPlaceholderName(item.name));
-        const droppedCount = mapped.length - filtered.length;
-
-        if (droppedCount > 0) {
-            console.debug(`[ExpenseAccountSuggestions] Dropped ${droppedCount} placeholder account suggestion(s)`);
-        }
-
-        console.debug(`[ExpenseAccountSuggestions] Returning ${filtered.length} valid accounts after filtering`);
-        return filtered;
+        return mapped;
     }
 
     /**

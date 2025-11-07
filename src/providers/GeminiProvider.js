@@ -107,10 +107,17 @@ export default class GeminiProvider extends Provider {
     console.debug(`[GeminiProvider] Model options:`, modelOptions);
     console.debug(`[GeminiProvider] Default options:`, this.#defaultOptions);
 
+    // Gemini uses maxOutputTokens instead of max_tokens, so we need to convert it.
+    const passedOptions = { ...modelOptions };
+    if (passedOptions.max_tokens) {
+      passedOptions.maxOutputTokens = passedOptions.max_tokens;
+      delete passedOptions.max_tokens;
+    }
+
     try {
       const generationConfig = {
         ...this.#defaultOptions,
-        ...modelOptions,
+        ...passedOptions,
       };
 
       console.debug(`[GeminiProvider] Final generation config:`, generationConfig);
@@ -153,10 +160,6 @@ export default class GeminiProvider extends Provider {
       if (result?.response?.candidates?.length > 0) {
         const finishReason = result.response.candidates[0].finishReason;
         console.debug(`[GeminiProvider] Finish reason: ${finishReason}`);
-
-        if (finishReason === 'MAX_TOKENS' && text.length > 0) {
-          console.warn(`[GeminiProvider] Response was truncated due to max tokens limit`);
-        }
       }
 
       if (!text) {

@@ -155,23 +155,18 @@ export default class App {
             const items = [];
             if (Array.isArray(result?.data)) {
                 result.data.forEach(entry => {
-                    const splits = entry?.attributes?.transactions ?? [];
-                    splits.forEach((split, idx) => {
-                        const splitId = split?.internal_reference ?? split?.internal_id ?? split?.transaction_journal_id ?? split?.id ?? `${entry.id}:${idx}`;
-                        items.push({
-                            journalId: entry.id,
-                            id: splitId,
-                            date: split?.date ?? entry?.attributes?.date ?? null,
-                            type: split?.type ?? entry?.attributes?.transaction_type ?? null,
-                            description: split?.description ?? entry?.attributes?.description ?? null,
-                            amount: split?.amount ?? null,
-                            currency: split?.currency_code ?? entry?.attributes?.currency_code ?? null,
-                            source_name: split?.source_name ?? null,
-                            destination_name: split?.destination_name ?? null,
-                            category_name: split?.category_name ?? null,
-                            category_id: split?.category_id ?? null,
-                        });
-                    });
+                  items.push({
+                    id: entry.id,
+                    date: split?.date ?? entry?.attributes?.date ?? null,
+                    type: split?.type ?? entry?.attributes?.transaction_type ?? null,
+                    description: split?.description ?? entry?.attributes?.description ?? null,
+                    amount: split?.amount ?? null,
+                    currency: split?.currency_code ?? entry?.attributes?.currency_code ?? null,
+                    source_name: split?.source_name ?? null,
+                    destination_name: split?.destination_name ?? null,
+                    category_name: split?.category_name ?? null,
+                    category_id: split?.category_id ?? null,
+                  });
                 });
             }
 
@@ -338,8 +333,6 @@ export default class App {
             newData.prompt = classification?.prompt;
             newData.response = classification?.response;
 
-            // Expense account classification
-            let accountId;
             let accountAction;
             try {
                 if (!description) {
@@ -351,18 +344,16 @@ export default class App {
                     destination_name: destinationName,
                 });
 
-                if (decision.decision === 'existing' && decision.account.id) {
-                    accountId = decision.account.id;
-                    console.info(`Matched to existing expense account: ${decision.account.name}`);
+                switch (decision.decision) {
+                  case 'existing':
                     accountAction = "matched";
-                } else if (decision.decision === 'create' && decision.account.name) {
-                    console.info(`Planned to create new expense account: ${decision.account.name}`);
+                    break;
+                  case 'create':
                     accountAction = "created";
-                } else {
+                    break;
+                  default:
                     throw new ExpenseAccountError('Invalid expense account decision structure returned by AI');
                 }
-
-                const finalAccountId = accountId || decision.account?.id || null;
 
                 newData.expenseAccount = {
                     name: decision.account.name,
@@ -370,16 +361,17 @@ export default class App {
                     action: accountAction,
                     decision: decision.decision,
                     source: decision.account.source || null,
-                    accountId: finalAccountId,
+                    accountId: decision.account?.id || null,
                 };
             } catch (e) {
                 const error = e instanceof ExpenseAccountError ? e : new ExpenseAccountError(e.message, e);
-                console.error("Could not categorize expense account", error);
                 newData.expenseAccount = {
                     error: error.message,
                     action: 'failed',
                     errorType: error.name
                 };
+
+                throw new CategoryError(`Failed to categorize expense account: ${error.message}`);
             }
 
             this.#jobList.updateJobData(job.id, newData);
@@ -390,13 +382,18 @@ export default class App {
                 console.warn(`Provider returned unknown category '${classification.category}'. Transaction will remain uncategorized.`);
             }
 
-            // Create and/or set expense account in Firefly III
             if (newData.expenseAccount && newData.expenseAccount.action !== 'failed') {
+                let resolvedAccountId = accountId;
+
                 if (accountAction === "created") {
-                    accountId = await this.#firefly.createAccount(newData.expenseAccount.name, 'expense', newData.expenseAccount.description);
-                    this.#expenseAccountMatcher.updateCacheWithAccountId(transaction, accountId);
+                    resolvedAccountId = await this.#firefly.createAccount(newData.expenseAccount.name, 'expense', newData.expenseAccount.description);
                 }
-                await this.#firefly.setAccount(transactionId, transactions, accountId, 'destination');
+
+                if (resolvedAccountId) {
+                    await this.#firefly.setAccount(transactionId, transactions, resolvedAccountId, 'destination');
+                } else {
+                    throw new Error(`[App] No accountId available to set for transaction ${transactionId}, action: ${accountAction}`);
+                }
             }
 
             this.#jobList.setJobFinished(job.id);
@@ -452,6 +449,13 @@ class HttpError extends Error {
     constructor(code, message) {
         super(message);
         this.code = code;
+    }
+}
+
+class CategoryError extends Error {
+    constructor(message) {
+      super(message);
+      this.name = 'CategoryError'
     }
 }
 

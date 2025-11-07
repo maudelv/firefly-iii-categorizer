@@ -13,7 +13,6 @@ export default class GeminiProvider extends Provider {
     const apiKey = getConfigVariable("GEMINI_API_KEY");
     this.#modelName = getConfigVariable("GEMINI_MODEL", "gemini-2.5-flash");
 
-    // Set default model options from environment
     this.#defaultOptions = {
       temperature: parseFloat(getConfigVariable("GEMINI_TEMPERATURE", "0.3")),
       maxOutputTokens: 2048
@@ -25,6 +24,25 @@ export default class GeminiProvider extends Provider {
       generationConfig: this.#defaultOptions
     });
   }
+
+
+  /**
+  * Classifies a transaction using Gemini's completion API.
+  * @param {Object} options - The classification options
+  * @param {string[]} options.categories - Array of valid category names to classify into
+  * @param {string} options.destinationName - Name of the transaction destination/recipient
+  * @param {string} options.description - Transaction description or subject line
+  * @param {Object} [options.metadata={}] - Additional metadata for the transaction
+  * @param {Object} [options.modelOptions={}] - Gemini model options (temperature, maxOutputTokens, etc.)
+  * @param {number} [options.modelOptions.temperature] - Sampling temperature (0.0-2.0)
+  * @param {number} [options.modelOptions.maxOutputTokens] - Maximum tokens to generate
+  * @returns {Promise<Object|null>} Promise resolving to classification result or null if classification failed
+  * @returns {string} [returns.prompt] - The exact prompt sent to Gemini
+  * @returns {string} [returns.response] - Raw response text from Gemini
+  * @returns {string} [returns.category] - The chosen category (must be in options.categories)
+  * @throws {GeminiProviderException} When Gemini API call fails (network error, invalid API key, etc.)
+  * @throws {GeminiProviderException} When Gemini API response contains an error
+  */
 
   async classify({ categories, destinationName, description, metadata = {}, modelOptions = {} }) {
     // eslint-disable-line no-unused-vars
@@ -38,7 +56,7 @@ export default class GeminiProvider extends Provider {
       const generationConfig = {
         ...this.#defaultOptions,
         ...modelOptions,
-        maxOutputTokens: 2048 // Always use 2048 tokens to prevent truncation
+        maxOutputTokens: 2048
       };
 
       const modelWithConfig = this.#model.startChat({
@@ -72,6 +90,16 @@ export default class GeminiProvider extends Provider {
       );
     }
   }
+
+  /**
+   * Gets a text completion from Gemini's API.
+   * @param {string} prompt - The text prompt to send to Gemini for completion
+   * @param {Object} [modelOptions={}] - Additional Gemini model options to override defaults
+   * @param {number} [modelOptions.temperature] - Sampling temperature (0.0-2.0), overrides default
+   * @param {number} [modelOptions.maxOutputTokens] - Maximum tokens to generate, overrides default
+   * @returns {Promise<string>} Promise resolving to the completed text from Gemini
+   * @throws {GeminiProviderException} When Gemini API call fails or returns an error
+   */
 
   async getCompletion(prompt, modelOptions = {}) {
     console.debug(`[GeminiProvider] getCompletion called`);

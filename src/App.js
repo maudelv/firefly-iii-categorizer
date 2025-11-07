@@ -319,88 +319,230 @@ export default class App {
 
     #enqueueClassificationJob({job, transactionId, transactions, destinationName, description}) {
         this.#queue.push(async () => {
-            this.#jobList.setJobInProgress(job.id);
-
-            const categories = await this.#firefly.getCategories();
-
-            const classification = await this.#provider.classify({
-                categories: Array.from(categories.keys()),
-                destinationName,
-                description,
-                metadata: {
-                    transactionId,
-                },
-            });
-
-            const newData = Object.assign({}, job.data);
-            newData.category = classification?.category ?? null;
-            newData.prompt = classification?.prompt;
-            newData.response = classification?.response;
-
-            let accountAction;
             try {
-                if (!description) {
-                    throw new ExpenseAccountError("Missing transaction description for expense account matching");
-                }
-
-                const decision = await this.#expenseAccountMatcher.matchTransaction({
+                console.log(`[JobQueue] Starting job ${job?.id} for transaction ${transactionId}`);
+                console.log(`[JobQueue] Job input data:`, {
+                    transactionId,
+                    destinationName,
                     description,
-                    destination_name: destinationName,
+                    hasTransactions: !!transactions,
+                    transactionsCount: transactions?.length || 0
                 });
 
-                switch (decision.decision) {
-                  case 'existing':
-                    accountAction = "matched";
-                    break;
-                  case 'create':
-                    accountAction = "created";
-                    break;
-                  default:
-                    throw new ExpenseAccountError('Invalid expense account decision structure returned by AI');
+                this.#jobList.setJobInProgress(job.id);
+                console.log(`[JobQueue] Job ${job?.id} marked as in progress`);
+
+                console.log(`[JobQueue] Fetching categories from Firefly...`);
+                const categories = await this.#firefly.getCategories();
+                console.log(`[JobQueue] Retrieved ${categories?.size || 0} categories`);
+
+                console.log(`[JobQueue] Starting classification with provider...`);
+                const classification = await this.#provider.classify({
+                    categories: Array.from(categories.keys()),
+                    destinationName,
+                    description,
+                    metadata: {
+                        transactionId,
+                    },
+                });
+                console.log(`[JobQueue] Classification completed:`, {
+                    category: classification?.category,
+                    hasPrompt: !!classification?.prompt,
+                    hasResponse: !!classification?.response
+                });
+
+                const newData = Object.assign({}, job.data);
+                newData.category = classification?.category ?? null;
+                newData.prompt = classification?.prompt;
+                newData.response = classification?.response;
+                console.log(`[JobQueue] Job data updated with classification results`);
+
+                let accountAction;
+                let decision;
+                try {
+                    console.log(`[JobQueue] Starting expense account matching...`);
+                    if (!description) {
+                        console.log(`[JobQueue] Missing description for expense account matching`);
+                        throw new ExpenseAccountError("Missing transaction description for expense account matching");
+                    }
+
+                    console.log(`[JobQueue] Calling expense account matcher with:`, { description, destination_name: destinationName });
+                    decision = await this.#expenseAccountMatcher.matchTransaction({
+                        description,
+                        destination_name: destinationName,
+                    });
+                    console.log(`[JobQueue] Account matcher decision:`, {
+                        decision: decision?.decision,
+                        accountName: decision?.account?.name,
+                        accountId: decision?.account?.id
+                    });
+
+                    switch (decision.decision) {
+                      case 'existing':
+                        accountAction = "matched";
+                        console.log(`[JobQueue] Account action set to: matched`);
+                        break;
+                      case 'create':
+                        accountAction = "created";
+                        console.log(`[JobQueue] Account action set to: created`);
+                        break;
+                      default:
+                        console.log(`[JobQueue] Invalid decision structure:`, decision);
+                        throw new ExpenseAccountError('Invalid expense account decision structure returned by AI');
+                    }
+
+                    newData.expenseAccount = {
+                        name: decision.account.name,
+                        description: decision.account.description || '',
+                        action: accountAction,
+                        decision: decision.decision,
+                        source: decision.account.source || null,
+                        accountId: decision.account?.id || null,
+                    };
+                    console.log(`[JobQueue] Expense account data prepared:`, {
+                        name: newData.expenseAccount.name,
+                        action: newData.expenseAccount.action,
+                        accountId: newData.expenseAccount.accountId
+                    });
+                } catch (e) {
+                    console.log(`[JobQueue] Error in expense account matching:`, {
+                        error: e.message,
+                        stack: e.stack,
+                        errorType: e.constructor.name
+                    });
+
+                    const error = e instanceof ExpenseAccountError ? e : new ExpenseAccountError(e.message, e);
+                    newData.expenseAccount = {
+                        error: error.message,
+                        action: 'failed',
+                        errorType: error.name
+                    };
+
+                    console.log(`[JobQueue] Throwing CategoryError for expense account failure`);
+                    throw new CategoryError(`Failed to categorize expense account: ${error.message}`);
                 }
 
-                newData.expenseAccount = {
-                    name: decision.account.name,
-                    description: decision.account.description || '',
-                    action: accountAction,
-                    decision: decision.decision,
-                    source: decision.account.source || null,
-                    accountId: decision.account?.id || null,
-                };
-            } catch (e) {
-                const error = e instanceof ExpenseAccountError ? e : new ExpenseAccountError(e.message, e);
-                newData.expenseAccount = {
-                    error: error.message,
-                    action: 'failed',
-                    errorType: error.name
-                };
+                console.log(`[JobQueue] Updating job data in JobList...`);
+                this.#jobList.updateJobData(job.id, newData);
+                console.log(`[JobQueue] Job data updated successfully`);
 
-                throw new CategoryError(`Failed to categorize expense account: ${error.message}`);
-            }
-
-            this.#jobList.updateJobData(job.id, newData);
-
-            if (classification?.category && categories.has(classification.category)) {
-                await this.#firefly.setCategory(transactionId, transactions, categories.get(classification.category));
-            } else if (classification?.category) {
-                console.warn(`Provider returned unknown category '${classification.category}'. Transaction will remain uncategorized.`);
-            }
-
-            if (newData.expenseAccount && newData.expenseAccount.action !== 'failed') {
-                let resolvedAccountId = accountId;
-
-                if (accountAction === "created") {
-                    resolvedAccountId = await this.#firefly.createAccount(newData.expenseAccount.name, 'expense', newData.expenseAccount.description);
-                }
-
-                if (resolvedAccountId) {
-                    await this.#firefly.setAccount(transactionId, transactions, resolvedAccountId, 'destination');
+                // Category processing
+                if (classification?.category && categories.has(classification.category)) {
+                    console.log(`[JobQueue] Setting category '${classification.category}' for transaction ${transactionId}`);
+                    await this.#firefly.setCategory(transactionId, transactions, categories.get(classification.category));
+                    console.log(`[JobQueue] Category set successfully`);
+                } else if (classification?.category) {
+                    console.warn(`Provider returned unknown category '${classification.category}'. Transaction will remain uncategorized.`);
                 } else {
-                    throw new Error(`[App] No accountId available to set for transaction ${transactionId}, action: ${accountAction}`);
+                    console.log(`[JobQueue] No category to set for transaction`);
                 }
-            }
 
-            this.#jobList.setJobFinished(job.id);
+                // Account processing
+                if (newData.expenseAccount && newData.expenseAccount.action !== 'failed') {
+                    console.log(`[JobQueue] Processing expense account action: ${newData.expenseAccount.action}`);
+                    // Get current account ID from the transaction's destination account
+                    // Fetch transaction data to get the primary split (without category validation)
+                    const currentTransaction = await this.#firefly.getTransaction(transactionId);
+                    const currentSplits = currentTransaction?.data?.attributes?.transactions ?? [];
+                    const primarySplit = currentSplits[0]; // Get first split without validation
+                    let resolvedAccountId = primarySplit?.destination_id || null;
+
+                    if (accountAction === "created") {
+                        console.log(`[JobQueue] Creating new expense account:`, {
+                            name: newData.expenseAccount.name,
+                            description: newData.expenseAccount.description
+                        });
+                        try {
+                            resolvedAccountId = await this.#firefly.createAccount(
+                                newData.expenseAccount.name,
+                                'expense',
+                                newData.expenseAccount.description
+                            );
+                            console.log(`[JobQueue] Account created successfully with ID: ${resolvedAccountId}`);
+                        } catch (createError) {
+                            console.error(`[JobQueue] Failed to create account:`, {
+                                error: createError.message,
+                                stack: createError.stack,
+                                accountName: newData.expenseAccount.name
+                            });
+
+                            // Smart fallback: if account already exists, find it and use it
+                            // Handle both regular and escaped Unicode characters
+                            const errorMessage = createError.message;
+                            const isDuplicateName =
+                                errorMessage.includes('Este nombre de cuenta ya está en uso') ||
+                                errorMessage.includes('Este nombre de cuenta ya est\\u00e1 en uso') ||
+                                errorMessage.includes('account name already in use') ||
+                                errorMessage.includes('name already in use') ||
+                                errorMessage.includes('duplicate') ||
+                                (errorMessage.includes('422') && errorMessage.includes('name'));
+
+                            if (isDuplicateName) {
+                                console.log(`[JobQueue] Account already exists, searching for existing account: ${newData.expenseAccount.name}`);
+                                try {
+                                    const suggestions = await this.#firefly.getExpenseAccountSuggestions(newData.expenseAccount.name, 50);
+                                    const existingAccount = suggestions.find(suggestion => suggestion.name.toLowerCase() === newData.expenseAccount.name.toLowerCase());
+                                    if (existingAccount) {
+                                        resolvedAccountId = existingAccount.id;
+                                        console.log(`[JobQueue] Found existing account with ID: ${resolvedAccountId}`);
+                                    } else {
+                                        throw new Error(`Account '${newData.expenseAccount.name}' appears to exist but could not be found`);
+                                    }
+                                } catch (findError) {
+                                    console.error(`[JobQueue] Failed to find existing account:`, findError.message);
+                                    throw findError;
+                                }
+                            } else {
+                                throw createError; // Re-throw original error if not duplicate name
+                            }
+                        }
+                    } else if (accountAction === "matched") {
+                        resolvedAccountId = decision.account.id;
+                        console.log(`[JobQueue] Using existing account ID: ${resolvedAccountId}`);
+                    }
+
+                    if (resolvedAccountId) {
+                        console.log(`[JobQueue] Setting account ${resolvedAccountId} as destination for transaction ${transactionId}`);
+                        await this.#firefly.setAccount(transactionId, transactions, resolvedAccountId, 'destination');
+                        console.log(`[JobQueue] Account set successfully`);
+                    } else {
+                        const errorMsg = `[App] No accountId available to set for transaction ${transactionId}, action: ${accountAction}`;
+                        console.error(`[JobQueue] ${errorMsg}`, {
+                            accountAction,
+                            resolvedAccountId,
+                            decision,
+                            newData
+                        });
+                        throw new Error(errorMsg);
+                    }
+                } else {
+                    console.log(`[JobQueue] Skipping account processing:`, {
+                        hasExpenseAccount: !!newData.expenseAccount,
+                        action: newData.expenseAccount?.action
+                    });
+                }
+
+                console.log(`[JobQueue] Marking job ${job?.id} as finished`);
+                this.#jobList.setJobFinished(job.id);
+                console.log(`[JobQueue] Job ${job?.id} completed successfully`);
+
+            } catch (error) {
+                console.error(`[JobQueue] CRITICAL ERROR in job ${job?.id}:`, {
+                    error: error.message,
+                    stack: error.stack,
+                    errorType: error.constructor.name,
+                    job: {
+                        id: job?.id,
+                        transactionId,
+                        destinationName,
+                        description
+                    },
+                    timestamp: new Date().toISOString()
+                });
+
+                // Re-lanzar el error para que la cola lo maneje
+                throw error;
+            }
         });
     }
 

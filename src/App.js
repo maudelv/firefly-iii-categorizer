@@ -155,18 +155,22 @@ export default class App {
             const items = [];
             if (Array.isArray(result?.data)) {
                 result.data.forEach(entry => {
-                  items.push({
-                    id: entry.id,
-                    date: split?.date ?? entry?.attributes?.date ?? null,
-                    type: split?.type ?? entry?.attributes?.transaction_type ?? null,
-                    description: split?.description ?? entry?.attributes?.description ?? null,
-                    amount: split?.amount ?? null,
-                    currency: split?.currency_code ?? entry?.attributes?.currency_code ?? null,
-                    source_name: split?.source_name ?? null,
-                    destination_name: split?.destination_name ?? null,
-                    category_name: split?.category_name ?? null,
-                    category_id: split?.category_id ?? null,
-                  });
+                    const transaction = entry?.attributes?.transactions?.[0];
+                    if (transaction) {
+                        items.push({
+                            id: entry.id,
+                            journalId: transaction.transaction_journal_id,
+                            date: transaction.date,
+                            type: transaction.type,
+                            description: transaction.description,
+                            amount: transaction.amount,
+                            currency: transaction.currency_code,
+                            source_name: transaction.source_name,
+                            destination_name: transaction.destination_name,
+                            category_name: transaction.category_name,
+                            category_id: transaction.category_id,
+                        });
+                    }
                 });
             }
 

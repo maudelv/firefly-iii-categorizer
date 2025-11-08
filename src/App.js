@@ -7,12 +7,15 @@ import * as http from "http";
 import Queue from "queue";
 import JobList from "./JobList.js";
 
+import ExpenseAccountMatcher from "./ExpenseAccountMatcher.js";
+
 export default class App {
     #PORT;
     #ENABLE_UI;
 
     #firefly;
     #provider;
+    #expenseAccountMatcher;
 
     #server;
     #io;
@@ -30,6 +33,7 @@ export default class App {
     async run() {
         this.#firefly = new FireflyService();
         this.#provider = createProviderFromConfig();
+        this.#expenseAccountMatcher = new ExpenseAccountMatcher(this.#provider, this.#firefly);
 
         this.#queue = new Queue({
             timeout: 30 * 1000,
@@ -39,7 +43,7 @@ export default class App {
 
         this.#queue.addEventListener('start', job => console.log('Job started', job))
         this.#queue.addEventListener('success', event => console.log('Job success', event.job))
-        this.#queue.addEventListener('error', event => console.error('Job error', event.job, event.err, event))
+        this.#queue.addEventListener('error', (err, job) => console.error('Job error', {err, job}))
         this.#queue.addEventListener('timeout', event => console.log('Job timeout', event.job))
 
         this.#express = express();
@@ -334,12 +338,65 @@ export default class App {
             newData.prompt = classification?.prompt;
             newData.response = classification?.response;
 
+            // Expense account classification
+            let accountId;
+            let accountAction;
+            try {
+                if (!description) {
+                    throw new ExpenseAccountError("Missing transaction description for expense account matching");
+                }
+
+                const decision = await this.#expenseAccountMatcher.matchTransaction({
+                    description,
+                    destination_name: destinationName,
+                });
+
+                if (decision.decision === 'existing' && decision.account.id) {
+                    accountId = decision.account.id;
+                    console.info(`Matched to existing expense account: ${decision.account.name}`);
+                    accountAction = "matched";
+                } else if (decision.decision === 'create' && decision.account.name) {
+                    console.info(`Planned to create new expense account: ${decision.account.name}`);
+                    accountAction = "created";
+                } else {
+                    throw new ExpenseAccountError('Invalid expense account decision structure returned by AI');
+                }
+
+                const finalAccountId = accountId || decision.account?.id || null;
+
+                newData.expenseAccount = {
+                    name: decision.account.name,
+                    description: decision.account.description || '',
+                    action: accountAction,
+                    decision: decision.decision,
+                    source: decision.account.source || null,
+                    accountId: finalAccountId,
+                };
+            } catch (e) {
+                const error = e instanceof ExpenseAccountError ? e : new ExpenseAccountError(e.message, e);
+                console.error("Could not categorize expense account", error);
+                newData.expenseAccount = {
+                    error: error.message,
+                    action: 'failed',
+                    errorType: error.name
+                };
+            }
+
             this.#jobList.updateJobData(job.id, newData);
 
             if (classification?.category && categories.has(classification.category)) {
                 await this.#firefly.setCategory(transactionId, transactions, categories.get(classification.category));
             } else if (classification?.category) {
                 console.warn(`Provider returned unknown category '${classification.category}'. Transaction will remain uncategorized.`);
+            }
+
+            // Create and/or set expense account in Firefly III
+            if (newData.expenseAccount && newData.expenseAccount.action !== 'failed') {
+                if (accountAction === "created") {
+                    accountId = await this.#firefly.createAccount(newData.expenseAccount.name, 'expense', newData.expenseAccount.description);
+                    this.#expenseAccountMatcher.updateCacheWithAccountId(transaction, accountId);
+                }
+                await this.#firefly.setAccount(transactionId, transactions, accountId, 'destination');
             }
 
             this.#jobList.setJobFinished(job.id);
@@ -379,6 +436,7 @@ export default class App {
 
         return primarySplit;
     }
+
 }
 
 class WebhookException extends Error {
@@ -394,5 +452,13 @@ class HttpError extends Error {
     constructor(code, message) {
         super(message);
         this.code = code;
+    }
+}
+
+class ExpenseAccountError extends Error {
+    constructor(message, originalError = null) {
+        super(message);
+        this.name = 'ExpenseAccountError';
+        this.originalError = originalError;
     }
 }

@@ -23,6 +23,22 @@ export default class Provider {
         throw new Error(`${this.constructor.name}.getCompletion must be implemented`);
     }
 
+    /**
+     * Get prompt from the model.
+     * @returns {string} prompt - The prompt to use
+     */
+    async getPrompt() { // eslint-disable-line no-unused-vars
+        throw new Error(`${this.constructor.name}.getPrompt must be implemented`);
+    }
+
+    /**
+     * Get expense account prompt from the model.
+     * @returns {string} prompt - The prompt to use
+     */
+    async getExpenseAccountPrompt() { // eslint-disable-line no-unused-vars
+        throw new Error(`${this.constructor.name}.getExpenseAccountPrompt must be implemented`);
+    }
+
     // Expose a lightweight capability descriptor for diagnostics and UI.
     getCapabilities() {
         return {

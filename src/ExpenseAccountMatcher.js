@@ -145,9 +145,26 @@ export default class ExpenseAccountMatcher {
     }
 
     async #createNewAccountWithAi(transaction) {
-        const prompt = `Transaction: "${transaction.description}"${transaction.destination_name ? ` at ${transaction.destination_name}` : ""}
-Create a descriptive expense account name. Respond with JSON only:
-{"decision": "create", "account": {"name": "account_name", "description": "brief description"}}`;
+        const prompt = `You are categorizing a financial transaction. Your primary goal is to create SPECIFIC expense accounts using the actual merchant/brand/store name rather than generic categories.
+
+        TRANSACTION DATA:
+        - Description: "${transaction.description}"
+        - Merchant/Location: ${transaction.destination_name || 'Not specified'}
+
+        RULES FOR ACCOUNT NAMING:
+        1. ALWAYS prefer the actual merchant/brand name over generic categories
+        2. Use the exact business name if available and recognizable
+        3. Only use generic names when the merchant is unclear or truly generic (like "ATM Withdrawal")
+        4. Keep names concise but descriptive (2-4 words ideally)
+
+        EXAMPLES:
+        GOOD (specific): "Starbucks Coffee", "Shell Gas Station", "Amazon Purchase", "Walmart Groceries"
+        BAD (generic): "Coffee Shop", "Gas Station", "Online Shopping", "Grocery Store"
+
+        TASK:
+        Analyze the transaction and create an expense account. Respond with JSON only:
+
+        {"decision": "create", "account": {"name": "specific_merchant_name", "description": "brief_description_of_what_this_account_covers"}}`;
 
         const modelOptions = {
             temperature: 0.2,

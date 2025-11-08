@@ -1,7 +1,7 @@
 # Firefly III AI categorization
 
 This project allows you to automatically categorize your expenses in [Firefly III](https://www.firefly-iii.org/) by
-using configurable AI providers (OpenAI by default, Gemini supported out of the box).
+using configurable AI providers (OpenAI by default, Gemini and Synthetic.new supported out of the box).
 
 ## How it works
 
@@ -72,6 +72,18 @@ Set `AI_PROVIDER=openai` (default) and `OPENAI_API_KEY` with the secret you gene
 - Copy the key and set it as `GEMINI_API_KEY` in your environment.
 
 Gemini models require an allowed billing project. You can optionally override the default model by exporting `GEMINI_MODEL` (defaults to `gemini-2.5-flash`). Remember to set `AI_PROVIDER=gemini` when using this integration.
+
+#### Synthetic.new
+
+Synthetic.new provides access to various AI models through an OpenAI-compatible API.
+
+- Visit your Synthetic.new instance or provider to obtain an API key.
+- Copy the API key and set it as `SYNTHETIC_API_KEY` in your environment.
+
+Set `AI_PROVIDER=synthetic` when using this integration. You can optionally configure:
+- `SYNTHETIC_BASE_URL`: The base URL of the Synthetic.new API (defaults to `https://synthetic.xdelloco.xyz`)
+- `SYNTHETIC_MODEL`: The model to use (defaults to `hf:Qwen/Qwen3-235B-A22B-Instruct-2507`)
+- `SYNTHETIC_TEMPERATURE`: Sampling temperature from 0.0 to 2.0 (defaults to `0.7`)
 
 ### 3. Start the application via Docker
 
@@ -222,10 +234,14 @@ If you have to run the application on a different port than the default port `30
 
 - `FIREFLY_URL`: The URL to your Firefly III instance. Example: `https://firefly.example.com`. (required)
 - `FIREFLY_PERSONAL_TOKEN`: A Firefly III Personal Access Token. (required)
-- `AI_PROVIDER`: Selects which AI integration to run (`openai`, `gemini`). (Default: `openai`)
+- `AI_PROVIDER`: Selects which AI integration to run (`openai`, `gemini`, `synthetic`). (Default: `openai`)
 - `OPENAI_API_KEY`: The OpenAI API Key to authenticate against OpenAI. (Required when `AI_PROVIDER=openai`)
 - `GEMINI_API_KEY`: Google AI Studio API key for Gemini access. (Required when `AI_PROVIDER=gemini`)
 - `GEMINI_MODEL`: Gemini model name to use. (Default: `gemini-2.5-flash`)
+- `SYNTHETIC_API_KEY`: Synthetic.new API key for access. (Required when `AI_PROVIDER=synthetic`)
+- `SYNTHETIC_BASE_URL`: The base URL of the Synthetic.new API. (Default: `https://synthetic.xdelloco.xyz`)
+- `SYNTHETIC_MODEL`: Synthetic.new model name to use. (Default: `hf:Qwen/Qwen3-235B-A22B-Instruct-2507`)
+- `SYNTHETIC_TEMPERATURE`: Sampling temperature for Synthetic.new (0.0-2.0). (Default: `0.7`)
 - `ENABLE_UI`: If the user interface should be enabled. (Default: `false`)
 - `FIREFLY_TAG`: The tag to assign to the processed transactions. (Default: `AI categorized`)
 - `PORT`: The port where the application listens. (Default: `3000`)

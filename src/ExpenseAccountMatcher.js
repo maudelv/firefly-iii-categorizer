@@ -145,26 +145,11 @@ export default class ExpenseAccountMatcher {
     }
 
     async #createNewAccountWithAi(transaction) {
-        const prompt = `You are categorizing a financial transaction. Your primary goal is to create SPECIFIC expense accounts using the actual merchant/brand/store name rather than generic categories.
-
-        TRANSACTION DATA:
-        - Description: "${transaction.description}"
-        - Merchant/Location: ${transaction.destination_name || 'Not specified'}
-
-        RULES FOR ACCOUNT NAMING:
-        1. ALWAYS prefer the actual merchant/brand name over generic categories
-        2. Use the exact business name if available and recognizable
-        3. Only use generic names when the merchant is unclear or truly generic (like "ATM Withdrawal")
-        4. Keep names concise but descriptive (2-4 words ideally)
-
-        EXAMPLES:
-        GOOD (specific): "Starbucks Coffee", "Shell Gas Station", "Amazon Purchase", "Walmart Groceries"
-        BAD (generic): "Coffee Shop", "Gas Station", "Online Shopping", "Grocery Store"
-
-        TASK:
-        Analyze the transaction and create an expense account. Respond with JSON only:
-
-        {"decision": "create", "account": {"name": "specific_merchant_name", "description": "brief_description_of_what_this_account_covers"}}`;
+        const modelConfiguration = await this.#provider.getExpenseAccountCreationPrompt({
+            description: transaction.description,
+            destinationName: transaction.destination_name,
+            metadata: {}
+        });
 
         const modelOptions = {
             temperature: 0.2,
@@ -173,29 +158,17 @@ export default class ExpenseAccountMatcher {
 
         console.debug(`[ExpenseAccountMatcher] Creating new account with AI. Transaction: ${transaction.description}`);
 
-        const responseText = await this.#provider.getCompletion(prompt, modelOptions);
-
-        // Extract JSON from markdown response
-        let parsedResponse;
-        try {
-            // Remove markdown formatting if present
-            const jsonText = responseText.replace(/```json\n?|\n?```/g, '').trim();
-            parsedResponse = JSON.parse(jsonText);
-        } catch (error) {
-            console.error(`[ExpenseAccountMatcher] Failed to parse AI response: ${error.message}`);
-            console.error(`[ExpenseAccountMatcher] Raw response: ${responseText}`);
-            throw new Error("AI failed to generate a valid new account structure");
-        }
+        const response = await this.#provider.getCompletion(modelConfiguration, modelOptions);
 
         // Ensure AI response has correct structure
-        if (parsedResponse.decision !== "create" || !parsedResponse.account?.name) {
+        if (response.decision !== "create" || !response.account?.name) {
             throw new Error("AI failed to generate a valid new account structure");
         }
 
-        parsedResponse.account.description = parsedResponse.account.description ?? "";
-        parsedResponse.account.source = "ai-new";
+        response.account.description = response.account.description ?? "";
+        response.account.source = "ai-new";
 
-        return parsedResponse;
+        return response;
     }
 
     #normalizeText(input) {

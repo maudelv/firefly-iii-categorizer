@@ -6,8 +6,8 @@ import {Server} from "socket.io";
 import * as http from "http";
 import Queue from "queue";
 import JobList from "./JobList.js";
-
 import ExpenseAccountMatcher from "./ExpenseAccountMatcher.js";
+import TransactionValidator, {WebhookException, ValidationError} from "./TransactionValidator.js";
 
 export default class App {
     #PORT;
@@ -23,7 +23,6 @@ export default class App {
 
     #queue;
     #jobList;
-
 
     constructor() {
         this.#PORT = getConfigVariable("PORT", '3000');
@@ -78,100 +77,66 @@ export default class App {
     #onWebhook(req, res) {
         try {
             console.info("Webhook triggered");
-            this.#handleWebhook(req, res);
+            this.#handleWebhook(req);
             res.send("Queued");
         } catch (e) {
             console.error(e)
-            res.status(400).send(e.message);
+
+            if (e instanceof WebhookException) {
+                res.status(400).send(e.message);
+            } else if (e instanceof ValidationError) {
+                res.status(e.code).send(e.message);
+            } else {
+                res.status(500).send("Internal server error");
+            }
         }
     }
 
-    #handleWebhook(req, res) {
-        // TODO: validate auth
-
-        if (req.body?.trigger !== "STORE_TRANSACTION") {
-            throw new WebhookException("trigger is not STORE_TRANSACTION. Request will not be processed");
-        }
-
-        if (req.body?.response !== "TRANSACTIONS") {
-            throw new WebhookException("trigger is not TRANSACTION. Request will not be processed");
-        }
-
-        if (!req.body?.content?.id) {
-            throw new WebhookException("Missing content.id");
-        }
-
-        if (req.body?.content?.transactions?.length === 0) {
-            throw new WebhookException("No transactions are available in content.transactions");
-        }
-
-        if (req.body.content.transactions[0].type !== "withdrawal") {
-            throw new WebhookException("content.transactions[0].type has to be 'withdrawal'. Transaction will be ignored.");
-        }
-
-        if (req.body.content.transactions[0].category_id !== null) {
-            throw new WebhookException("content.transactions[0].category_id is already set. Transaction will be ignored.");
-        }
-
-        if (!req.body.content.transactions[0].description) {
-            throw new WebhookException("Missing content.transactions[0].description");
-        }
-
-        if (!req.body.content.transactions[0].destination_name) {
-            throw new WebhookException("Missing content.transactions[0].destination_name");
-        }
-
-        const transactionId = req.body.content.id;
-        const transactions = req.body.content.transactions;
-        const destinationName = transactions[0].destination_name;
-        const description = transactions[0].description
+    #handleWebhook(req) {
+        const validated = TransactionValidator.validateWebhookPayload(req.body);
 
         const job = this.#jobList.createJob({
-            transactionId,
-            destinationName,
-            description
+            transactionId: validated.transactionId,
+            destinationName: validated.destinationName,
+            description: validated.description
         });
 
         this.#enqueueClassificationJob({
             job,
-            transactionId,
-            transactions,
-            destinationName,
-            description
+            transactionId: validated.transactionId,
+            transactions: validated.transactions,
+            destinationName: validated.destinationName,
+            description: validated.description
         });
     }
 
     async #getTransactions(req, res) {
         try {
-            console.log("Fetching transactions...")
-            const limit = this.#parsePositiveInt(req.query?.limit, 10);
-            const page = this.#parsePositiveInt(req.query?.page, 1);
+            const limit = parseInt(req.query?.limit, 10) || 10;
+            const page = parseInt(req.query?.page, 10) || 1;
             const type = typeof req.query?.type === "string" && req.query.type.trim().length > 0 ? req.query.type : "default";
 
             const result = await this.#firefly.getTransactions({limit, page, type});
 
-            console.log("Transactions fetched successfully", JSON.stringify(result))
-
             const items = [];
             if (Array.isArray(result?.data)) {
                 result.data.forEach(entry => {
-                    const splits = entry?.attributes?.transactions ?? [];
-                    splits.forEach((split, idx) => {
-                        const splitId = split?.internal_reference ?? split?.internal_id ?? split?.transaction_journal_id ?? split?.id ?? `${entry.id}:${idx}`;
+                    const transaction = entry?.attributes?.transactions?.[0];
+                    if (transaction) {
                         items.push({
-                            journalId: entry.id,
-                            id: splitId,
-                            date: split?.date ?? entry?.attributes?.date ?? null,
-                            type: split?.type ?? entry?.attributes?.transaction_type ?? null,
-                            description: split?.description ?? entry?.attributes?.description ?? null,
-                            amount: split?.amount ?? null,
-                            currency: split?.currency_code ?? entry?.attributes?.currency_code ?? null,
-                            source_name: split?.source_name ?? null,
-                            destination_name: split?.destination_name ?? null,
-                            category_name: split?.category_name ?? null,
-                            category_id: split?.category_id ?? null,
+                            id: entry.id,
+                            journalId: transaction.transaction_journal_id,
+                            date: transaction.date,
+                            type: transaction.type,
+                            description: transaction.description,
+                            amount: transaction.amount,
+                            currency: transaction.currency_code,
+                            source_name: transaction.source_name,
+                            destination_name: transaction.destination_name,
+                            category_name: transaction.category_name,
+                            category_id: transaction.category_id,
                         });
-                    });
+                    }
                 });
             }
 
@@ -221,8 +186,12 @@ export default class App {
             res.status(202).json({job});
         } catch (error) {
             console.error("Failed to enqueue classification job", error);
-            const status = error?.code ?? 500;
-            res.status(status).send(error?.message ?? "Unable to enqueue classification job");
+
+            if (error instanceof ValidationError || error instanceof HttpError) {
+                res.status(error.code).send(error.message);
+            } else {
+                res.status(500).send("Unable to enqueue classification job");
+            }
         }
     }
 
@@ -260,10 +229,15 @@ export default class App {
                     jobs.push(job);
                 } catch (error) {
                     console.error(`Failed to enqueue classification job for transaction ${id}`, error);
+
+                    const status = (error instanceof ValidationError || error instanceof HttpError)
+                        ? error.code
+                        : 500;
+
                     errors.push({
                         transactionId: id,
-                        status: error?.code ?? 500,
-                        message: error?.message ?? "Unable to enqueue classification job"
+                        status: status,
+                        message: error.message || "Unable to enqueue classification job"
                     });
                 }
             }
@@ -284,8 +258,12 @@ export default class App {
             res.status(202).json(payload);
         } catch (error) {
             console.error("Failed to enqueue batch classification jobs", error);
-            const status = error?.code ?? 500;
-            res.status(status).send(error?.message ?? "Unable to enqueue classification jobs");
+
+            if (error instanceof ValidationError || error instanceof HttpError) {
+                res.status(error.code).send(error.message);
+            } else {
+                res.status(500).send("Unable to enqueue classification jobs");
+            }
         }
     }
 
@@ -297,8 +275,7 @@ export default class App {
         }
 
         const splits = transactionData?.attributes?.transactions ?? [];
-        const primarySplit = this.#ensureClassifiableTransaction(splits);
-
+        const primarySplit = TransactionValidator.validateTransactionSplits(splits);
         const normalizedId = transactionData.id ?? String(transactionId);
 
         const job = this.#jobList.createJob({
@@ -320,138 +297,192 @@ export default class App {
 
     #enqueueClassificationJob({job, transactionId, transactions, destinationName, description}) {
         this.#queue.push(async () => {
-            this.#jobList.setJobInProgress(job.id);
+            const context = new JobContext(job, transactionId, transactions, destinationName, description);
 
-            const categories = await this.#firefly.getCategories();
-
-            const classification = await this.#provider.classify({
-                categories: Array.from(categories.keys()),
-                destinationName,
-                description,
-                metadata: {
-                    transactionId,
-                },
-            });
-
-            const newData = Object.assign({}, job.data);
-            newData.category = classification?.category ?? null;
-            newData.prompt = classification?.prompt;
-            newData.response = classification?.response;
-
-            // Expense account classification
-            let accountId;
-            let accountAction;
             try {
-                if (!description) {
-                    throw new ExpenseAccountError("Missing transaction description for expense account matching");
-                }
+                console.info(`[Job ${job.id}] Starting classification for transaction ${transactionId}`);
+                this.#jobList.setJobInProgress(job.id);
 
-                const decision = await this.#expenseAccountMatcher.matchTransaction({
-                    description,
-                    destination_name: destinationName,
-                });
+                await this.#executeClassification(context);
+                await this.#executeAccountMatching(context);
 
-                if (decision.decision === 'existing' && decision.account.id) {
-                    accountId = decision.account.id;
-                    console.info(`Matched to existing expense account: ${decision.account.name}`);
-                    accountAction = "matched";
-                } else if (decision.decision === 'create' && decision.account.name) {
-                    console.info(`Planned to create new expense account: ${decision.account.name}`);
-                    accountAction = "created";
-                } else {
-                    throw new ExpenseAccountError('Invalid expense account decision structure returned by AI');
-                }
+                this.#jobList.updateJobData(job.id, context.jobData);
 
-                const finalAccountId = accountId || decision.account?.id || null;
+                await this.#applyClassificationResults(context);
 
-                newData.expenseAccount = {
-                    name: decision.account.name,
-                    description: decision.account.description || '',
-                    action: accountAction,
-                    decision: decision.decision,
-                    source: decision.account.source || null,
-                    accountId: finalAccountId,
-                };
-            } catch (e) {
-                const error = e instanceof ExpenseAccountError ? e : new ExpenseAccountError(e.message, e);
-                console.error("Could not categorize expense account", error);
-                newData.expenseAccount = {
-                    error: error.message,
-                    action: 'failed',
-                    errorType: error.name
-                };
+                this.#jobList.setJobFinished(job.id);
+                console.info(`[Job ${job.id}] Completed successfully`);
+            } catch (error) {
+                console.error(`[Job ${job.id}] Failed:`, error.message);
+                throw error;
             }
-
-            this.#jobList.updateJobData(job.id, newData);
-
-            if (classification?.category && categories.has(classification.category)) {
-                await this.#firefly.setCategory(transactionId, transactions, categories.get(classification.category));
-            } else if (classification?.category) {
-                console.warn(`Provider returned unknown category '${classification.category}'. Transaction will remain uncategorized.`);
-            }
-
-            // Create and/or set expense account in Firefly III
-            if (newData.expenseAccount && newData.expenseAccount.action !== 'failed') {
-                if (accountAction === "created") {
-                    accountId = await this.#firefly.createAccount(newData.expenseAccount.name, 'expense', newData.expenseAccount.description);
-                    this.#expenseAccountMatcher.updateCacheWithAccountId(transaction, accountId);
-                }
-                await this.#firefly.setAccount(transactionId, transactions, accountId, 'destination');
-            }
-
-            this.#jobList.setJobFinished(job.id);
         });
     }
 
-    #parsePositiveInt(value, fallback) {
-        const parsed = Number.parseInt(value, 10);
-        if (Number.isNaN(parsed) || parsed <= 0) {
-            return fallback;
-        }
+    async #executeClassification(context) {
+        const categories = await this.#firefly.getCategories();
 
-        return parsed;
+        const classification = await this.#provider.classify({
+            categories: Array.from(categories.keys()),
+            destinationName: context.destinationName,
+            description: context.description,
+            metadata: {transactionId: context.transactionId},
+        });
+
+        context.setClassification(classification, categories);
+        console.info(`[Job ${context.job.id}] Classification: ${classification?.category || 'none'}`);
     }
 
-    #ensureClassifiableTransaction(transactions) {
-        if (!Array.isArray(transactions) || transactions.length === 0) {
-            throw new HttpError(400, "Transaction has no splits to classify");
-        }
+    async #executeAccountMatching(context) {
+        try {
+            const decision = await this.#expenseAccountMatcher.matchTransaction({
+                description: context.description,
+                destination_name: context.destinationName,
+            });
 
-        const primarySplit = transactions[0];
-        if (primarySplit?.type !== "withdrawal") {
-            throw new HttpError(400, "Only withdrawal transactions can be classified");
-        }
+            const accountAction = decision.decision === 'existing' ? 'matched' : 'created';
 
-        if (primarySplit?.category_id != null) {
-            throw new HttpError(400, "Transaction already has a category");
-        }
+            context.setExpenseAccount({
+                name: decision.account.name,
+                description: decision.account.description || '',
+                action: accountAction,
+                decision: decision.decision,
+                source: decision.account.source || null,
+                accountId: decision.account.id || null,
+            });
 
-        if (!primarySplit?.description) {
-            throw new HttpError(400, "Transaction is missing a description");
+            console.info(`[Job ${context.job.id}] Account: ${decision.account.name} (${accountAction})`);
+        } catch (error) {
+            const expenseError = error instanceof ExpenseAccountError ? error : new ExpenseAccountError(error.message, error);
+            context.setExpenseAccountError(expenseError);
+            throw new CategoryError(`Failed to categorize expense account: ${expenseError.message}`);
         }
-
-        if (!primarySplit?.destination_name) {
-            throw new HttpError(400, "Transaction is missing a destination name");
-        }
-
-        return primarySplit;
     }
 
+    async #applyClassificationResults(context) {
+        if (context.shouldApplyCategory()) {
+            await this.#firefly.setCategory(
+                context.transactionId,
+                context.transactions,
+                context.categoryId
+            );
+            console.info(`[Job ${context.job.id}] Category applied: ${context.jobData.category}`);
+        } else if (context.jobData.category) {
+            console.warn(`[Job ${context.job.id}] Unknown category '${context.jobData.category}', skipping`);
+        }
+
+        if (context.shouldApplyAccount()) {
+            const accountId = await this.#resolveAccountId(context);
+            await this.#firefly.setAccount(
+                context.transactionId,
+                context.transactions,
+                accountId,
+                'destination'
+            );
+            console.info(`[Job ${context.job.id}] Account applied: ${accountId}`);
+        }
+    }
+
+    async #resolveAccountId(context) {
+        const expenseAccount = context.jobData.expenseAccount;
+
+        if (expenseAccount.action === 'matched') {
+            return expenseAccount.accountId;
+        }
+
+        if (expenseAccount.action === 'created') {
+            try {
+                return await this.#firefly.createAccount(
+                    expenseAccount.name,
+                    'expense',
+                    expenseAccount.description
+                );
+            } catch (createError) {
+                if (this.#isDuplicateAccountError(createError)) {
+                    return await this.#findExistingAccount(expenseAccount.name);
+                }
+                throw createError;
+            }
+        }
+
+        throw new Error(`Cannot resolve account ID for action: ${expenseAccount.action}`);
+    }
+
+    #isDuplicateAccountError(error) {
+        return error.message.includes('422');
+    }
+
+    async #findExistingAccount(accountName) {
+        const suggestions = await this.#firefly.getExpenseAccountSuggestions(accountName, 50);
+        const existingAccount = suggestions.find(
+            suggestion => suggestion.name.toLowerCase() === accountName.toLowerCase()
+        );
+
+        if (!existingAccount) {
+            throw new Error(`Account '${accountName}' appears to exist but could not be found`);
+        }
+
+        return existingAccount.id;
+    }
 }
 
-class WebhookException extends Error {
+class JobContext {
+    constructor(job, transactionId, transactions, destinationName, description) {
+        this.job = job;
+        this.transactionId = transactionId;
+        this.transactions = transactions;
+        this.destinationName = destinationName;
+        this.description = description;
 
-    constructor(message) {
-        super(message);
+        this.jobData = {...job.data};
+        this.categories = null;
+        this.categoryId = null;
+    }
+
+    setClassification(classification, categories) {
+        this.categories = categories;
+        this.jobData.category = classification?.category || null;
+        this.jobData.prompt = classification?.prompt;
+        this.jobData.response = classification?.response;
+
+        if (classification?.category && categories.has(classification.category)) {
+            this.categoryId = categories.get(classification.category);
+        }
+    }
+
+    setExpenseAccount(accountData) {
+        this.jobData.expenseAccount = accountData;
+    }
+
+    setExpenseAccountError(error) {
+        this.jobData.expenseAccount = {
+            error: error.message,
+            action: 'failed',
+            errorType: error.name
+        };
+    }
+
+    shouldApplyCategory() {
+        return this.jobData.category && this.categoryId;
+    }
+
+    shouldApplyAccount() {
+        return this.jobData.expenseAccount && this.jobData.expenseAccount.action !== 'failed';
     }
 }
 
 class HttpError extends Error {
-    code;
-
     constructor(code, message) {
         super(message);
+        this.name = 'HttpError';
         this.code = code;
+    }
+}
+
+class CategoryError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'CategoryError'
     }
 }
 

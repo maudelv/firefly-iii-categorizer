@@ -16,6 +16,8 @@ export default class Provider {
      * Get completion from the model.
      * @param {string} prompt - The prompt to send
      * @param {object} modelOptions - Model-specific options
+     * @param {number} [modelOptions.temperature] - Sampling temperature (0.0-2.0)
+     * @param {number} [modelOptions.max_tokens] - Maximum number of tokens to generate
      */
     async getCompletion(prompt, modelOptions = {}) { // eslint-disable-line no-unused-vars
         throw new Error(`${this.constructor.name}.getCompletion must be implemented`);

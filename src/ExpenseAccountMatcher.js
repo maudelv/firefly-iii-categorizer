@@ -1,3 +1,10 @@
+import { getConfigVariable } from "./util.js";
+
+const CONFIG = {
+  AUTOCOMPLETE_LIMIT: getConfigVariable("EXPENSE_ACCOUNT_AUTOCOMPLETE_LIMIT", 15),
+  AI_TEMPERATURE: getConfigVariable("EXPENSE_ACCOUNT_AI_TEMPERATURE", 0.2)
+}
+
 const DEFAULT_AUTOCOMPLETE_LIMIT = 15;
 const PLACEHOLDER_VALUES = new Set([
     "",
@@ -7,11 +14,44 @@ const PLACEHOLDER_VALUES = new Set([
     "desconocido",
 ]);
 
+const GENERIC_PHRASES = [
+  "google pay",
+  "apple pay",
+  "compra en",
+  "compras en",
+  "con la tarjeta",
+  "tarjeta",
+]
+
+const STOP_WORDS = new Set([
+  "con",
+  "en",
+  "por",
+  "para",
+  "una",
+  "un",
+  "y",
+  "el",
+  "la",
+  "los",
+  "las",
+  "de",
+  "del",
+  "al",
+  "compra",
+  "compras",
+  "tarjeta",
+  "banco",
+  "pago",
+  "google",
+  "pay",
+  "apple",
+])
+
 export default class ExpenseAccountMatcher {
     #provider;
     #firefly;
     #autocompleteLimit;
-    #decisionCache;
 
     constructor(provider, fireflyService, options = {}) {
         if (!provider) {
@@ -21,7 +61,6 @@ export default class ExpenseAccountMatcher {
         this.#provider = provider;
         this.#firefly = fireflyService;
         this.#autocompleteLimit = options.autocompleteLimit ?? DEFAULT_AUTOCOMPLETE_LIMIT;
-        this.#decisionCache = new Map();
     }
 
     #isPlaceholder(text) {
@@ -49,97 +88,6 @@ export default class ExpenseAccountMatcher {
         return stripped.length === 0 || PLACEHOLDER_VALUES.has(stripped);
     }
 
-    #isValidResponse(data) {
-        return Boolean(
-            data &&
-            typeof data === "object" &&
-            typeof data.decision === "string" &&
-            ["existing", "create"].includes(data.decision) &&
-            data.account &&
-            typeof data.account === "object" &&
-            typeof data.account.name === "string" &&
-            data.account.name.trim().length > 0 &&
-            (data.decision === "existing" || typeof data.account.description === "string")
-        );
-    }
-
-    #parseResponse(responseText) {
-        console.debug(`[ExpenseAccountMatcher] Attempting to parse response: "${responseText}"`);
-
-        if (!responseText || typeof responseText !== "string") {
-            console.error("[ExpenseAccountMatcher] Invalid response type or empty response");
-            throw new Error("Empty or invalid response from AI");
-        }
-
-        const trimmed = responseText.trim();
-
-        let cleaned = trimmed;
-        if (cleaned.startsWith("```json")) {
-            cleaned = cleaned.replace(/```json\s*/, "").replace(/```\s*$/, "");
-        } else if (cleaned.startsWith("```")) {
-            cleaned = cleaned.replace(/```\s*/, "").replace(/```\s*$/, "");
-        }
-
-        let jsonStr = cleaned;
-        const firstBrace = cleaned.indexOf("{");
-        const lastBrace = cleaned.lastIndexOf("}");
-
-        if (firstBrace !== -1 && lastBrace !== -1 && lastBrace > firstBrace) {
-            jsonStr = cleaned.substring(firstBrace, lastBrace + 1);
-            console.debug(`[ExpenseAccountMatcher] Extracted JSON: "${jsonStr}"`);
-        }
-
-        if (!jsonStr || jsonStr.trim().length === 0) {
-            console.error("[ExpenseAccountMatcher] No JSON found in AI response");
-            throw new Error("No JSON found in AI response");
-        }
-
-        try {
-            const parsed = JSON.parse(jsonStr);
-            console.debug("[ExpenseAccountMatcher] Successfully parsed JSON");
-
-            if (!this.#isValidResponse(parsed)) {
-                console.error("[ExpenseAccountMatcher] Invalid AI response structure:", JSON.stringify(parsed, null, 2));
-                throw new Error("Invalid response structure from AI");
-            }
-
-            return parsed;
-        } catch (error) {
-            console.error("[ExpenseAccountMatcher] Failed to parse AI response:", responseText);
-            console.error("[ExpenseAccountMatcher] Parse error:", error.message);
-            throw new Error(`Failed to parse AI response: ${error.message}`);
-        }
-    }
-
-    #buildPrompt(transaction, candidateNames) {
-        const hasCandidates = candidateNames.length > 0;
-        const candidatesText = hasCandidates ? candidateNames.join(", ") : "None";
-
-        return `Analyze this transaction and respond with JSON:
-Transaction: "${transaction.description}"${transaction.destination_name ? ` at ${transaction.destination_name}` : ""}
-Candidates: ${candidatesText}
-If candidates exist, match one. Otherwise, create a new account.
-Required response format:
-{
-    "decision": "existing",
-    "account": {
-        "name": "account name here",
-        "description": "brief description here"
-    }
-}
-
-Or for new accounts:
-{
-    "decision": "create",
-    "account": {
-        "name": "new account name here",
-        "description": "brief description here"
-    }
-}
-
-The decision field must be exactly either "existing" or "create". No explanations, just JSON.`;
-    }
-
     async matchTransaction(transaction) {
         if (!transaction || !transaction.description) {
             throw new Error("Transaction with description is required");
@@ -147,11 +95,6 @@ The decision field must be exactly either "existing" or "create". No explanation
 
         const descriptionInfo = this.#normalizeText(transaction.description);
         const destinationInfo = this.#normalizeText(transaction.destination_name ?? "");
-        const cacheKey = this.#buildCacheKey(descriptionInfo.normalizedText, destinationInfo.normalizedText);
-
-        if (this.#decisionCache.has(cacheKey)) {
-            return this.#cloneDecision(this.#decisionCache.get(cacheKey));
-        }
 
         const queries = this.#generateQueries(transaction, descriptionInfo, destinationInfo);
         const autocompleteCandidates = await this.#collectAutocompleteCandidates(queries);
@@ -173,56 +116,67 @@ The decision field must be exactly either "existing" or "create". No explanation
                 },
             };
 
-            this.#decisionCache.set(cacheKey, this.#cloneDecision(decision));
             return decision;
         }
 
-        const aiDecision = await this.#runAiDecision(transaction, autocompleteCandidates);
-
-        if (aiDecision.decision === "existing") {
-            this.#decisionCache.set(cacheKey, this.#cloneDecision(aiDecision));
+        // If no candidates found, use AI to generate a new account name
+        if (autocompleteCandidates.length === 0) {
+            return await this.#createNewAccountWithAi(transaction);
         }
 
-        return aiDecision;
+        // If we have candidates but deterministic matching failed,
+        // pick the first candidate (best available option)
+        const firstCandidate = autocompleteCandidates.find(c => !this.#isPlaceholder(c?.name));
+        if (firstCandidate) {
+            console.debug(`[ExpenseAccountMatcher] Deterministic matching failed, using first candidate: ${firstCandidate.name}`);
+            return {
+                decision: "existing",
+                account: {
+                    id: firstCandidate.id,
+                    name: firstCandidate.name,
+                    description: firstCandidate.description ?? "",
+                    source: "autocomplete-fallback",
+                },
+            };
+        }
+
+        // Fallback to creating new account
+        return await this.#createNewAccountWithAi(transaction);
     }
 
-    async #runAiDecision(transaction, candidates) {
-        const candidatesArray = Array.isArray(candidates) ? candidates : [];
-        const candidateNames = candidatesArray
-            .map(candidate => candidate?.name ?? "")
-            .filter(name => name && !this.#isPlaceholder(name));
-        const prompt = this.#buildPrompt(transaction, candidateNames);
+    async #createNewAccountWithAi(transaction) {
+        const prompt = `Transaction: "${transaction.description}"${transaction.destination_name ? ` at ${transaction.destination_name}` : ""}
+Create a descriptive expense account name. Respond with JSON only:
+{"decision": "create", "account": {"name": "account_name", "description": "brief description"}}`;
 
         const modelOptions = {
             temperature: 0.2,
-            maxOutputTokens: 2048,
+            max_tokens: 2048,
         };
 
-        console.debug(`[ExpenseAccountMatcher] Sending prompt to AI: ${prompt}`);
-        const response = await this.#provider.getCompletion(prompt, modelOptions);
-        console.debug(`[ExpenseAccountMatcher] AI response: ${response}`);
+        console.debug(`[ExpenseAccountMatcher] Creating new account with AI. Transaction: ${transaction.description}`);
 
-        const parsedResponse = this.#parseResponse(response);
-        console.debug("[ExpenseAccountMatcher] Parsed response:", JSON.stringify(parsedResponse, null, 2));
+        const responseText = await this.#provider.getCompletion(prompt, modelOptions);
 
-        if (parsedResponse.decision === "existing") {
-            const matchingCandidate = candidatesArray.find(candidate => {
-                const candidateName = candidate?.name ?? "";
-                if (this.#isPlaceholder(candidateName)) {
-                    return false;
-                }
-                return candidateName.toLowerCase() === parsedResponse.account.name.toLowerCase();
-            });
+        // Extract JSON from markdown response
+        let parsedResponse;
+        try {
+            // Remove markdown formatting if present
+            const jsonText = responseText.replace(/```json\n?|\n?```/g, '').trim();
+            parsedResponse = JSON.parse(jsonText);
+        } catch (error) {
+            console.error(`[ExpenseAccountMatcher] Failed to parse AI response: ${error.message}`);
+            console.error(`[ExpenseAccountMatcher] Raw response: ${responseText}`);
+            throw new Error("AI failed to generate a valid new account structure");
+        }
 
-            if (matchingCandidate) {
-                parsedResponse.account.id = matchingCandidate.id;
-            } else {
-                parsedResponse.decision = "create";
-            }
+        // Ensure AI response has correct structure
+        if (parsedResponse.decision !== "create" || !parsedResponse.account?.name) {
+            throw new Error("AI failed to generate a valid new account structure");
         }
 
         parsedResponse.account.description = parsedResponse.account.description ?? "";
-        parsedResponse.account.source = parsedResponse.decision === "existing" ? "ai" : "ai-new";
+        parsedResponse.account.source = "ai-new";
 
         return parsedResponse;
     }
@@ -250,52 +204,19 @@ The decision field must be exactly either "existing" or "create". No explanation
         const withoutDates = base.replace(/\b\d{4}-\d{2}-\d{2}\b/g, " ");
         const withoutLongDigits = withoutDates.replace(/\b\d{4,}\b/g, " ");
 
-        const genericPhrases = [
-            "google pay",
-            "apple pay",
-            "compra en",
-            "compras en",
-            "con la tarjeta",
-            "tarjeta",
-        ];
-
         let simplified = withoutLongDigits;
-        genericPhrases.forEach(phrase => {
+
+        GENERIC_PHRASES.forEach(phrase => {
             const pattern = new RegExp(`\\b${phrase.replace(/\s+/g, "\\s+")}\\b`, "g");
             simplified = simplified.replace(pattern, " ");
         });
 
         simplified = simplified.replace(/[^a-z\s]/g, " ");
 
-        const stopWords = new Set([
-            "con",
-            "en",
-            "por",
-            "para",
-            "una",
-            "un",
-            "y",
-            "el",
-            "la",
-            "los",
-            "las",
-            "de",
-            "del",
-            "al",
-            "compra",
-            "compras",
-            "tarjeta",
-            "banco",
-            "pago",
-            "google",
-            "pay",
-            "apple",
-        ]);
-
         const tokens = simplified
             .split(/\s+/)
             .map(token => token.trim())
-            .filter(token => token.length > 1 && !stopWords.has(token) && !/^\d+$/.test(token));
+            .filter(token => token.length > 1 && !STOP_WORDS.has(token) && !/^\d+$/.test(token));
 
         const uniqueTokens = Array.from(new Set(tokens));
 
@@ -385,7 +306,16 @@ The decision field must be exactly either "existing" or "create". No explanation
         }
 
         const targetTokens = new Set([...descriptionTokens, ...destinationTokens]);
-        const minimumMatches = Math.max(1, Math.ceil(targetTokens.size / 2));
+        console.debug(`[ExpenseAccountMatcher] Target tokens: [${[...targetTokens].join(', ')}]`);
+
+        const minimumMatches = targetTokens.size > 10
+            ? Math.max(1, Math.floor(targetTokens.size / 4))
+            : Math.max(1, Math.ceil(targetTokens.size / 2));
+
+        console.debug(`[ExpenseAccountMatcher] Minimum matches required: ${minimumMatches}`);
+
+        let bestMatch = null;
+        let bestMatchCount = 0;
 
         for (const candidate of candidates) {
             if (!candidate?.name) {
@@ -397,57 +327,17 @@ The decision field must be exactly either "existing" or "create". No explanation
 
             const matches = [...targetTokens].filter(token => candidateTokens.has(token)).length;
 
+            if (matches > bestMatchCount) {
+                bestMatch = candidate;
+                bestMatchCount = matches;
+            }
+
             if (matches >= minimumMatches) {
                 return candidate;
             }
         }
 
-        return null;
-    }
-
-    #buildCacheKey(descriptionText, destinationText) {
-        return `${descriptionText}::${destinationText}`;
-    }
-
-    #cloneDecision(decision) {
-        return {
-            decision: decision.decision,
-            account: {
-                id: decision.account.id,
-                name: decision.account.name,
-                description: decision.account.description ?? "",
-                source: decision.account.source,
-            },
-        };
-    }
-
-    /**
-     * Update cache entry with the actual account ID after creating a new account
-     * @param {Object} transaction - The transaction that was processed
-     * @param {string} accountId - The ID of the newly created account
-     */
-    updateCacheWithAccountId(transaction, accountId) {
-        if (!transaction || !accountId) {
-            return;
-        }
-
-        const descriptionInfo = this.#normalizeText(transaction.description);
-        const destinationInfo = this.#normalizeText(transaction.destination_name ?? "");
-        const cacheKey = this.#buildCacheKey(descriptionInfo.normalizedText, destinationInfo.normalizedText);
-
-        // Update the cached decision with the actual account ID
-        if (this.#decisionCache.has(cacheKey)) {
-            const cachedDecision = this.#decisionCache.get(cacheKey);
-            if (cachedDecision.decision === "create") {
-                cachedDecision.decision = "existing";
-                cachedDecision.account = {
-                    id: accountId,
-                    name: cachedDecision.account.name,
-                    description: cachedDecision.account.description,
-                    source: "created"
-                };
-                this.#decisionCache.set(cacheKey, this.#cloneDecision(cachedDecision));
-            }
-        }
+        // If no candidate meets threshold but we found a partial match, use the best one
+        return bestMatchCount > 0 ? bestMatch : null;
     }
 }

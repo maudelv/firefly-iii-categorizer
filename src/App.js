@@ -322,12 +322,15 @@ export default class App {
     async #executeClassification(context) {
         const categories = await this.#firefly.getCategories();
 
-        const classification = await this.#provider.classify({
+        const modelConfiguration = await this.#provider.getClassificationPrompt({
             categories: Array.from(categories.keys()),
             destinationName: context.destinationName,
             description: context.description,
             metadata: {transactionId: context.transactionId},
         });
+
+        const response = await this.#provider.getCompletion(modelConfiguration, {})
+        const classification = categories.has(response.category) ? response : null;
 
         context.setClassification(classification, categories);
         console.info(`[Job ${context.job.id}] Classification: ${classification?.category || 'none'}`);

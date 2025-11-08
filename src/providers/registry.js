@@ -1,10 +1,12 @@
 import {getConfigVariable, MissingEnvironmentVariableException} from "../util.js";
 import OpenAiProvider from "./OpenAiProvider.js";
 import GeminiProvider from "./GeminiProvider.js";
+import SyntheticProvider from "./SyntheticProvider.js";
 
 const PROVIDER_FACTORIES = new Map([
     ["openai", () => new OpenAiProvider()],
     ["gemini", () => new GeminiProvider()],
+    ["synthetic", () => new SyntheticProvider()],
 ]);
 
 export class ProviderConfigurationError extends Error {

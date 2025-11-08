@@ -15,7 +15,7 @@ export default class OpenAiProvider extends Provider {
 
     this.#defaultOptions = {
       temperature: parseFloat(getConfigVariable("OPENAI_TEMPERATURE", "0.7")),
-      max_tokens: 2048
+      max_tokens: parseInt(getConfigVariable("OPENAI_MAX_TOKENS", "2048"), 10)
     };
 
     this.#openai = new OpenAI({ apiKey });

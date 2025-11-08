@@ -25,87 +25,20 @@ export default class GeminiProvider extends Provider {
     });
   }
 
-
-  /**
-  * Classifies a transaction using Gemini's completion API.
-  * @param {Object} options - The classification options
-  * @param {string[]} options.categories - Array of valid category names to classify into
-  * @param {string} options.destinationName - Name of the transaction destination/recipient
-  * @param {string} options.description - Transaction description or subject line
-  * @param {Object} [options.metadata={}] - Additional metadata for the transaction
-  * @param {Object} [options.modelOptions={}] - Gemini model options (temperature, maxOutputTokens, etc.)
-  * @param {number} [options.modelOptions.temperature] - Sampling temperature (0.0-2.0)
-  * @param {number} [options.modelOptions.maxOutputTokens] - Maximum tokens to generate
-  * @returns {Promise<Object|null>} Promise resolving to classification result or null if classification failed
-  * @returns {string} [returns.prompt] - The exact prompt sent to Gemini
-  * @returns {string} [returns.response] - Raw response text from Gemini
-  * @returns {string} [returns.category] - The chosen category (must be in options.categories)
-  * @throws {GeminiProviderException} When Gemini API call fails (network error, invalid API key, etc.)
-  * @throws {GeminiProviderException} When Gemini API response contains an error
-  */
-
-  async classify({ categories, destinationName, description, metadata = {}, modelOptions = {} }) {
-    // eslint-disable-line no-unused-vars
-    try {
-      const prompt = this.#buildPrompt(
-        categories,
-        destinationName,
-        description,
-      );
-
-      const generationConfig = {
-        ...this.#defaultOptions,
-        ...modelOptions,
-        maxOutputTokens: 2048
-      };
-
-      const modelWithConfig = this.#model.startChat({
-        generationConfig
-      });
-
-      const response = await modelWithConfig.sendMessage(prompt);
-      const text = response?.response?.text?.() ?? "";
-
-      const guess = this.#normaliseGuess(text);
-
-      if (!categories.includes(guess)) {
-        console.warn(`Gemini could not classify the transaction.
-                Prompt: ${prompt}
-                Gemini guess: ${guess}`);
-        return null;
-      }
-
-      return {
-        prompt,
-        response: text,
-        category: guess,
-      };
-    } catch (error) {
-      if (error instanceof Error) {
-        throw new GeminiProviderException(error.message, error);
-      }
-
-      throw new GeminiProviderException(
-        "Unknown error while communicating with Gemini",
-      );
-    }
-  }
-
   /**
    * Gets a text completion from Gemini's API.
-   * @param {string} prompt - The text prompt to send to Gemini for completion
+   * @param {Object} modelConfiguration - The model configuration to use for completion
    * @param {Object} [modelOptions={}] - Additional Gemini model options to override defaults
    * @param {number} [modelOptions.temperature] - Sampling temperature (0.0-2.0), overrides default
    * @param {number} [modelOptions.maxOutputTokens] - Maximum tokens to generate, overrides default
-   * @returns {Promise<string>} Promise resolving to the completed text from Gemini
+   * @returns {Promise<Object>} Promise resolving to the completed text from Gemini
    * @throws {GeminiProviderException} When Gemini API call fails or returns an error
    */
-
-  async getCompletion(prompt, modelOptions = {}) {
+  // I don't think modelConfiguration is an good name, it works for now ig.
+  async getCompletion(modelConfiguration, modelOptions = {}) {
     console.debug(`[GeminiProvider] getCompletion called`);
-    console.debug(`[GeminiProvider] Prompt length: ${prompt?.length || 0}`);
-    console.debug(`[GeminiProvider] Model options:`, modelOptions);
-    console.debug(`[GeminiProvider] Default options:`, this.#defaultOptions);
+    console.debug(`[GeminiProvider] Model configuration:`, JSON.stringify(modelConfiguration));
+    console.debug(`[GeminiProvider] Model options:`, JSON.stringify(modelOptions));
 
     // Gemini uses maxOutputTokens instead of max_tokens, so we need to convert it.
     const passedOptions = { ...modelOptions };
@@ -118,90 +51,99 @@ export default class GeminiProvider extends Provider {
       const generationConfig = {
         ...this.#defaultOptions,
         ...passedOptions,
+        responseMimeType: modelConfiguration.responseMimeType || "application/json",
+        responseSchema: modelConfiguration.responseSchema || {type: "object"}
       };
 
       console.debug(`[GeminiProvider] Final generation config:`, generationConfig);
 
       const result = await this.#model.generateContent({
-        contents: [{ parts: [{ text: prompt }] }],
+        contents: [{ parts: [{ text: modelConfiguration.prompt }] }],
         generationConfig
       });
 
-      console.debug(`[GeminiProvider] Received response:`, result);
+      let text = result.response.text();
+      console.debug(`[GeminiProvider] Received response:`, text);
 
-      let text = "";
-
-      if (result?.response && typeof result.response.text === 'function') {
-        try {
-          const textResult = result.response.text();
-          console.debug(`[GeminiProvider] response.text() returned:`, typeof textResult, textResult);
-          if (typeof textResult === 'string') {
-            text = textResult;
-          }
-        } catch (e) {
-          console.error(`[GeminiProvider] Error calling response.text(): ${e.message}`);
-        }
-      }
-
-      if (!text && result?.response?.candidates?.length > 0) {
-        const candidate = result.response.candidates[0];
-        if (candidate?.content?.parts?.length > 0) {
-          const part = candidate.content.parts[0];
-          if (part?.text && typeof part.text === 'string') {
-            text = part.text;
-          }
-        }
-      }
-
-      console.debug(`[GeminiProvider] Extracted text: "${text}"`);
-      console.debug(`[GeminiProvider] Text length: ${text.length}`);
-
-      // Check if response was truncated
-      if (result?.response?.candidates?.length > 0) {
-        const finishReason = result.response.candidates[0].finishReason;
-        console.debug(`[GeminiProvider] Finish reason: ${finishReason}`);
-      }
-
-      if (!text) {
-        console.error(`[GeminiProvider] Response structure:`, JSON.stringify(result, null, 2));
-      }
-
-      return text;
+      return JSON.parse(text);
     } catch (error) {
-      console.error(`[GeminiProvider] Error in getCompletion:`, error);
-      console.error(`[GeminiProvider] Error type:`, typeof error);
-      console.error(`[GeminiProvider] Error message:`, error.message);
-      console.error(`[GeminiProvider] Error stack:`, error.stack);
-
-      if (error instanceof Error) {
-          throw new GeminiProviderException(error.message, error);
-      }
-
-      throw new GeminiProviderException(
-          "Unknown error while communicating with Gemini",
-      );
+      console.error(`[GeminiProvider] Error:`, error.message);
+      throw new GeminiProviderException(error.message, error);
     }
   }
 
-  getCapabilities() {
-    return {
-      id: "gemini",
-      label: "Gemini",
-      models: [this.#modelName],
+  async getClassificationPrompt({categories, destinationName, description, metadata = {}}) {
+      const categoryList = categories.join(", ");
+      const responseMimeType = "application/json";
+      const responseSchema = {
+        type: "object",
+        properties: {
+          category: {
+            type: "string",
+            enum: categories,
+          },
+        },
+        required: ["category"],
+      };
+      const prompt = `You are an automated financial transaction classifier. Categorize this transaction:
+
+      TRANSACTION DATA:
+      - Destination: "${destinationName}"
+      - Description: "${description}"
+
+      Available categories: [${categoryList}]
+
+      Choose the most appropiate category from the list above.`;
+      return {responseMimeType, responseSchema, prompt};
+  }
+
+  async getExpenseAccountCreationPrompt({description, destinationName, metadata = {}}) {
+    const responseMimeType = "application/json";
+    const responseSchema = {
+        type: "object",
+        properties: {
+            decision: {
+                type: "string",
+                enum: ["create"],
+                description: "Always 'create' for new account generation"
+            },
+            account: {
+                type: "object",
+                properties: {
+                    name: {
+                        type: "string",
+                        description: "Specific merchant or brand name (2-4 words ideally)"
+                    },
+                    description: {
+                        type: "string",
+                        description: "Brief description of what this account covers"
+                    }
+                },
+                required: ["name", "description"]
+            }
+        },
+        required: ["decision", "account"]
     };
-  }
 
-  #buildPrompt(categories, destinationName, description) {
-    const categoryList = categories.join(", ");
-    return `You are an automated financial transaction classifier. Only respond with one of the provided categories. Categories: ${categoryList} Destination Name: "${destinationName}" Description: "${description}" Respond with the single category label that best matches the transaction.`;
-  }
+    const prompt = `You are creating specific expense accounts for financial transactions. Your goal is to create accounts using the actual merchant/brand name rather than generic categories.
 
-  #normaliseGuess(rawText) {
-    if (!rawText) {
-      return "";
-    }
+    TRANSACTION DATA:
+    - Description: "${description}"
+    - Merchant/Location: ${destinationName || 'Not specified'}
 
-    return rawText.split("\n")[0].trim();
+    RULES FOR ACCOUNT NAMING:
+    1. ALWAYS prefer the actual merchant/brand name over generic categories
+    2. Use the exact business name if available and recognizable
+    3. Only use generic names when the merchant is unclear (like "ATM Withdrawal")
+    4. Keep names concise but descriptive (2-4 words ideally)
+
+    EXAMPLES:
+    GOOD: "Starbucks Coffee", "Shell Gas Station", "Amazon Purchase", "Walmart Groceries"
+    BAD: "Coffee Shop", "Gas Station", "Online Shopping", "Grocery Store"
+
+    Create an appropriate expense account for this transaction.`;
+
+    return {responseMimeType, responseSchema, prompt};
   }
 }
 
